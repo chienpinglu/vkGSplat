@@ -1,0 +1,65 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.exp
+*.ilk
+
+# CUDA
+*.cubin
+*.fatbin
+*.ptx
+*.i
+*.ii
+
+# SPIR-V
+*.spv
+
+# IDE
+.vscode/
+.idea/
+*.user
+.cache/
+compile_commands.json
+
+# Vulkan SDK (downloaded into third_party/vulkan/sdk)
+third_party/vulkan/sdk/
+third_party/vulkan/*.tar.*
+third_party/vulkan/*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Paper
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
+paper/*.fls
+paper/*.fdb_latexmk
+paper/main.pdf
+
+# Assets (large binaries)
+assets/*.ply
+assets/*.splat
+assets/*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+.git.broken/

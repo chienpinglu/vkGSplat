@@ -1,0 +1,488 @@
+% vkSplat: A Compute-First Vulkan Path for Robotics Synthetic Data
+% Position / vision paper draft (v0.1)
+% Target venue: HotOS-style position track, HPG, MLSys, or arXiv preprint.
+
+\documentclass[10pt,journal]{IEEEtran}
+
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{url}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\note}[1]{\textcolor{blue}{[NOTE: #1]}}
+
+\title{vkSplat: A Compute-First Vulkan Path for Robotics\\Synthetic Data Generation on AI Accelerators}
+
+\author{%
+    Chien-Ping (CP) Lu\\%
+    \textit{Independent}\\%
+    \texttt{chienpng.lu@gmail.com}%
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Modern robotics increasingly depends on synthetic data generated inside
+photorealistic digital twins. The dominant pipelines --- NVIDIA Isaac~Sim
+\slash Omniverse, Cosmos, BlenderProc, Kubric --- bind the rendering layer to
+graphics-optimized silicon: GPUs with rasterizers, ROPs, and ray-tracing
+cores. We argue that this binding is incidental rather than fundamental.
+The trend is already visible inside graphics itself: DLSS and its peers have
+shifted the center of gravity of real-time rendering from fixed-function
+graphics units to \emph{tensor compute}, with the rasterizer and RT cores
+producing only a low-resolution, temporally and spatially sparse seed that
+neural networks then upscale, denoise, anti-alias, and
+interpolate~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,schied2017svgf,bitterli2020restir}.
+Synthetic data generation (SDG) is a \emph{throughput-bound,
+latency-tolerant} workload, and its rendering quality requirements --- while
+non-trivial --- are met by published compute-only techniques (software
+rasterization, GPU ray traversal, 3D Gaussian splatting) that do not require
+fixed-function graphics hardware. We propose \textbf{vkSplat}: a Vulkan
+implementation in which the API surface is preserved as a portable contract,
+but the backend is a software renderer expressed in CUDA-class compute. The
+near-term motivation is access: data-center AI accelerators (H100, B200, AI
+chips such as TPU and Trainium) are over an order of magnitude more available,
+in aggregate FLOPS and procurement velocity, than RTX-class workstation
+silicon. The longer-term motivation is portability: decoupling the API from
+the silicon turns digital-twin pipelines into a software problem with a clean
+backend interface. We present the system design, situate it relative to
+existing software-Vulkan implementations (SwiftShader, Mesa Lavapipe), justify
+3D Gaussian Splatting as the v1 renderer, and lay out an evaluation plan for
+throughput, energy, and downstream sim-to-real task accuracy. \todo{numbers}
+\end{abstract}
+
+\begin{IEEEkeywords}
+Synthetic data generation, Vulkan, software rendering, 3D Gaussian splatting,
+digital twins, robotics, AI accelerators.
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+Two trends are colliding. First, robotics has become a data-hungry
+discipline: end-to-end visuomotor policies, foundation models for
+manipulation, and autonomy stacks all require enormous quantities of
+labeled visual data, and an increasing fraction of that data is
+\emph{synthetic} --- rendered inside high-fidelity simulators
+\cite{tobin2017domain,greff2022kubric,denninger2019blenderproc,deitke2022procthor}.
+Second, the silicon supply chain has bifurcated: AI accelerators
+(NVIDIA~H100\slash B200, Google~TPU, AWS Trainium, and a long tail of
+emerging chips) are scaling FLOPS and memory bandwidth at a pace that
+outstrips the workstation-class GPUs traditionally used for graphics, and
+they dominate procurement budgets at every hyperscaler.
+
+The collision is awkward. Today's leading SDG stacks --- NVIDIA
+Omniverse\slash Isaac~Sim\slash Replicator and Cosmos
+\cite{nvidia2024cosmos}, Unreal-based platforms, Blender-based pipelines
+\cite{denninger2019blenderproc,greff2022kubric} --- are built on graphics
+APIs (Vulkan, D3D12, Metal, OpenGL) whose performant implementations
+require dedicated graphics silicon: rasterizer pipelines, ROPs, RT cores.
+The data-center accelerators that companies actually have are largely
+graphics-blind: an H100 has no RT cores, and TPUs and Trainium have no
+graphics pipeline at all. Generating training data on the chips one
+already owns therefore requires either (a) provisioning a separate fleet
+of graphics GPUs or (b) abandoning the graphics-API ecosystem in favor of
+custom rendering harnesses, which fragments the tooling.
+
+This paper takes the position that this fragmentation is unnecessary.
+Vulkan is a clean, modern, vendor-neutral API. There is no fundamental
+obstacle to implementing it as a \emph{software renderer expressed in
+compute kernels}, lowering rasterization, ray tracing, and shadow mapping
+to general-purpose accelerator compute. Software Vulkan implementations
+already exist (SwiftShader~\cite{swiftshader}, Mesa
+Lavapipe\slash llvmpipe~\cite{mesa-lavapipe}), but they target CPUs for
+correctness and conformance, not GPUs for throughput; they do not exploit
+the parallelism of AI accelerators, and they have not been engineered for
+SDG workloads. We propose to fill that gap.
+
+The argument has, in fact, already been made by the
+graphics-hardware industry's own roadmap. In modern real-time pipelines
+exemplified by NVIDIA DLSS~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3},
+the rasterizer and RT cores no longer produce the final image: they
+produce a \emph{low-resolution, temporally jittered, spatially sparse,
+under-sampled path-traced seed}. The rest of the pipeline ---
+super-resolution, anti-aliasing, denoising, frame
+interpolation~\cite{schied2017svgf,chaitanya2017interactive,nvidia-nrd},
+and importance-resampled direct illumination~\cite{bitterli2020restir} ---
+runs on tensor units. Each generation of DLSS shrinks the seed and
+expands the neural reconstruction. \emph{The center of gravity of the
+real-time rendering pipeline has already moved off fixed-function
+graphics hardware and onto tensor compute.} What we propose is the
+logical next step: if the AI portion is doing the heavy lifting, replace
+the fixed-function seed generator with a software-rendered seed produced
+on the same tensor-rich silicon, and eliminate the dependence on
+graphics-specific units altogether. For SDG, where real-time interaction
+is unnecessary, this trade is straightforward.
+
+\textbf{Contributions.} This is a position paper introducing the
+\textbf{vkSplat} project. We make four claims:
+
+\begin{enumerate}
+    \item \textbf{Workload.} Robotics SDG is throughput-bound and
+    latency-tolerant. A renderer that produces images in tens to hundreds
+    of milliseconds is acceptable if it sustains high aggregate throughput
+    and high quality. This relaxes the constraint that historically
+    forced the use of fixed-function graphics hardware
+    (Section~\ref{sec:workload}).
+
+    \item \textbf{API decoupling.} The Vulkan API can be preserved as the
+    application contract while the implementation is replaced by a
+    compute-only software renderer. We outline the architecture of such
+    an implementation (Section~\ref{sec:design}).
+
+    \item \textbf{3DGS-first renderer.} 3D Gaussian
+    Splatting~\cite{kerbl20233dgs} is the natural v1 renderer because it
+    is already compute-native: no rasterizer, no ROPs, no RT cores
+    required. We argue this lets the project ship a usable system before
+    tackling the harder problem of lowering classical raster and ray
+    tracing (Section~\ref{sec:v1}).
+
+    \item \textbf{Hardware-agnostic backend.} The compute IR underlying
+    the renderer can be retargeted from CUDA to SYCL, Triton, or
+    AI-accelerator native APIs, broadening deployment to any chip with
+    sufficient compute and memory bandwidth (Section~\ref{sec:backends}).
+\end{enumerate}
+
+\textbf{Non-goals.} vkSplat is not aimed at real-time gaming, VR, or
+display-bound interactive workloads. We do not claim to outperform RTX
+hardware on its own ground. We claim only that, for the SDG workload,
+running graphics on AI compute is viable, economically attractive, and
+strategically preferable.
+
+% =====================================================================
+\section{Background}\label{sec:bg}
+% =====================================================================
+
+\subsection{Synthetic data generation for robotics}
+
+The use of simulated environments to train physical agents predates deep
+learning, but its modern form was crystallized by domain
+randomization~\cite{tobin2017domain} and by simulation platforms such as
+Habitat~\cite{savva2019habitat}, ThreeDWorld~\cite{gan2020threedworld},
+ProcTHOR~\cite{deitke2022procthor}, and NVIDIA Isaac~Sim. Recent SDG
+toolkits like BlenderProc~\cite{denninger2019blenderproc} and
+Kubric~\cite{greff2022kubric} provide higher-level scripting for
+photorealistic image and video generation with controlled randomization
+of geometry, materials, and lighting. NVIDIA Cosmos~\cite{nvidia2024cosmos}
+extends this trajectory by combining classical rendering with generative
+priors. Across these systems, the rendering layer is the single largest
+silicon dependency.
+
+\subsection{Software Vulkan implementations}
+
+Two production software-Vulkan implementations exist.
+\textbf{SwiftShader}~\cite{swiftshader}, originally a software renderer
+project at TransGaming and now maintained by Google, provides a portable,
+LLVM-JIT-based Vulkan~1.3 implementation that runs on CPUs (it is shipped
+in Chromium for fallback rendering). \textbf{Mesa Lavapipe}~\cite{mesa-lavapipe}
+is the Vulkan front-end on top of Mesa's \texttt{llvmpipe} CPU rasterizer.
+Both are correctness-first and CPU-targeted; their performance on GPUs is
+either non-existent (Lavapipe is CPU-only) or limited (SwiftShader has
+experimental Reactor backends but is not optimized for AI-accelerator
+throughput). Neither targets the SDG workload class.
+
+\subsection{Compute-only graphics on GPUs}
+
+There is a long line of research in software rendering on
+general-purpose GPU compute. Laine and
+Karras~\cite{laine2011software} showed that a fully software rasterizer
+on CUDA could approach hardware rasterizer throughput for many workloads,
+particularly when rasterization was not the bottleneck.
+For ray tracing, Aila and Laine~\cite{aila2009understanding} established
+the architectural patterns that would later become OptiX~\cite{parker2010optix}
+and Embree~\cite{wald2014embree}. Path tracers including
+Mitsuba~3~\cite{jakob2022mitsuba3} (built on Dr.Jit~\cite{jakob2022drjit})
+and Falcor~\cite{benty2020falcor} demonstrate that high-quality,
+differentiable rendering can be expressed entirely in compute.
+Meanwhile, 3D Gaussian Splatting~\cite{kerbl20233dgs} and its
+descendants~\cite{yu2024mip,huang20242dgs} have established a new class
+of renderer that is compute-native by construction.
+
+The intellectual point is simple: every major step of a modern graphics
+pipeline has a published, competitive software-on-compute implementation.
+\textbf{What does not exist is a unified Vulkan front-end that exposes
+these implementations through a standard API to existing graphics
+applications.} That is the gap vkSplat targets.
+
+% =====================================================================
+\section{Why SDG is the right workload}\label{sec:workload}
+% =====================================================================
+
+\subsection{Throughput-bound, latency-tolerant}
+
+A real-time renderer must finish a frame in $\sim$16~ms or it fails.
+A SDG pipeline must produce a target number of labeled images per dollar
+or per joule; per-image latency is bounded only by the human iteration
+loop and downstream training pipeline. If a software renderer takes
+50~ms per image but uses one-tenth the silicon cost of an RTX-class
+solution, it wins on $\$\slash\textrm{image}$ even though it loses on
+frame time.
+
+\todo{Add a table: typical SDG image budgets vs.\ real-time budgets;
+illustrative throughput numbers.}
+
+\subsection{Quality requirements}
+
+SDG renderers do not need to convince a human that the image is real;
+they need to teach a model that the image is informative. Modern
+research~\cite{tobin2017domain,nvidia2024cosmos} suggests that
+\emph{diversity}, \emph{labeling fidelity}, and \emph{controlled
+randomization} matter more than the marginal photorealism that justifies
+RT-core hardware. A 3DGS rendering of a real scene captured with a
+phone, augmented with diverse synthetic objects, can be more useful for
+training than a mathematically prettier path-traced render of an
+unrealistic asset library.
+
+\subsection{Hardware availability and cost}
+
+\todo{Add a quantitative argument: aggregate H100\slash B200\slash TPU
+FLOPS available globally vs.\ aggregate L40\slash RTX-6000-Ada FLOPS;
+spot pricing per FLOP\slash s\slash dollar; energy per image budget.}
+
+The qualitative point is that any team that wants to do SDG today is
+either competing with rendering studios for L40s and RTX 6000 Adas, or
+running their renderer on consumer hardware that is unstable in
+data-center deployments. AI compute is, in contrast, the silicon those
+teams already have purchased for training.
+
+\subsection{The DLSS precedent: tensor compute is already where the
+rendering value lives}\label{sec:dlss}
+
+The strongest evidence that graphics workloads can move off
+graphics-specific silicon is that they already have, partially, inside
+NVIDIA's own products. We summarize the trajectory:
+
+\begin{itemize}
+    \item \textbf{DLSS~1 (2018).} Per-game neural super-resolution
+    networks reconstruct high-resolution frames from sub-native input.
+    The renderer's job is reduced from ``produce a $4\textrm{K}$
+    image'' to ``produce a $1080\textrm{p}$ image.''
+
+    \item \textbf{DLSS~2 (2020)~\cite{liu2020nsrr,edelsten2019dlss}.}
+    Generic temporal super-resolution. The rasterizer's frame budget
+    drops further and motion vectors become a first-class input. AI is
+    now responsible for both spatial and temporal reconstruction.
+
+    \item \textbf{DLSS~3 / Frame
+    Generation~(2022)~\cite{nvidia-dlss3}.} Optical-flow-conditioned
+    frame interpolation generates entire intermediate frames on tensor
+    cores --- frames the rasterizer never drew at all. The
+    fixed-function pipeline now contributes only a fraction of the
+    pixels the user sees.
+
+    \item \textbf{Ray-traced global illumination workflows} have
+    converged on the same pattern. Single-sample-per-pixel path
+    tracing, denoised by spatiotemporal
+    filters~\cite{schied2017svgf,chaitanya2017interactive,nvidia-nrd}
+    and importance-resampled by ReSTIR~\cite{bitterli2020restir}, has
+    replaced classical many-sample Monte Carlo. RT cores produce a few
+    sparse samples; tensor and shader cores reconstruct the rest.
+\end{itemize}
+
+The implication is direct. The fixed-function units already do not
+produce the final image; they produce a sparse, low-resolution, noisy
+\emph{seed} that AI then upscales, denoises, and interpolates. As the
+seed shrinks and the AI grows, the share of total rendering work done
+on tensor cores rises monotonically, and the marginal value of
+fixed-function silicon falls.
+
+Two questions then arise. \textbf{(1)} If the seed is small and noisy
+anyway, can a software renderer on compute produce it at acceptable
+quality? Published work on software rasterization~\cite{laine2011software},
+GPU ray traversal~\cite{aila2009understanding}, and compute-native 3DGS
+~\cite{kerbl20233dgs} suggests yes. \textbf{(2)} Once the seed is on
+compute, does any reason remain to maintain a separate fixed-function
+data path? For SDG, where there is no real-time constraint and where
+the final consumer of the image is a learned model rather than a human
+eye, the answer is no.
+
+vkSplat is the experiment that pushes this thesis to its conclusion.
+We do not argue that fixed-function graphics will disappear from
+real-time gaming. We argue that for the throughput-bound,
+latency-tolerant SDG workload, the DLSS-era trajectory has already made
+fixed-function graphics optional, and the implementation should be
+redrawn accordingly.
+
+% =====================================================================
+\section{System design}\label{sec:design}
+% =====================================================================
+
+vkSplat is structured as three layers
+(Fig.~\ref{fig:arch})\todo{draw figure}:
+
+\begin{enumerate}
+    \item \textbf{Vulkan front-end.} A Vulkan loadable ICD that
+    implements a \emph{conformance-targeted subset} of Vulkan~1.3 plus
+    selected ray-tracing and external-memory extensions. Applications
+    link the standard Vulkan loader and need no modification.
+
+    \item \textbf{Intermediate representation (IR).} SPIR-V shaders and
+    Vulkan command buffers are lowered into a backend-agnostic compute
+    IR. We propose to base this IR on existing infrastructure ---
+    LLVM\slash MLIR for shader code, a record-and-replay command-buffer
+    IR for pipeline state --- so that the system rides on existing
+    compiler ecosystems rather than inventing one.
+
+    \item \textbf{Compute backend.} The IR is lowered to one of several
+    backends: CUDA (reference), Triton or SYCL for portability, and
+    eventually AI-accelerator-native paths (XLA HLO for TPU, NeuronCore
+    for Trainium, etc.). The backend implements the rendering kernels:
+    rasterization, ray traversal, shadow mapping, and
+    Gaussian-splat blending.
+\end{enumerate}
+
+\subsection{Vulkan front-end}
+
+We target a deliberate \emph{subset}: graphics pipelines, compute
+pipelines, command buffers, descriptor sets, swapchain (optional, for
+debug viewer), timeline semaphores, external memory. We initially omit
+multi-draw-indirect at high feature parity, mesh shaders, sparse
+binding, and presentation-engine optimization. SDG does not need them.
+
+\subsection{Lowering rasterization}
+
+We lower the classical raster pipeline to a tile-based software
+rasterizer in the spirit of Laine and
+Karras~\cite{laine2011software}, with each output tile assigned to a
+threadblock\slash workgroup that performs binning, depth test, and
+fragment shading.
+
+\subsection{Lowering ray tracing and shadow mapping}
+
+Ray-tracing pipelines (\texttt{VK\_KHR\_ray\_tracing\_pipeline}) lower to
+software BVH traversal kernels following the
+Aila--Laine~\cite{aila2009understanding} pattern, optionally calling
+into Embree-like tree construction routines on the host. Shadow maps
+become depth-only raster passes followed by a comparison kernel; for
+high-quality shadows we expect ray-traced shadows to be cheaper than
+classical shadow-map filtering at SDG quality targets.
+
+\subsection{The 3DGS fast path}\label{sec:v1}
+
+We expose a non-standard Vulkan extension
+(\texttt{VK\_VKSPLAT\_gaussian\_splatting}) that lets applications submit
+Gaussian primitives directly. Internally, this dispatches to a
+3DGS rasterizer akin to \cite{kerbl20233dgs}'s but extended for offline
+SDG (deterministic ordering, deeper sample budgets per pixel, optional
+denoising). The rationale is that 3DGS does not need any of the
+classical pipeline machinery, and a system that ships a working 3DGS
+backend on day one is immediately useful for capturing real environments
+and rendering them as training scenes.
+
+% =====================================================================
+\section{Backends}\label{sec:backends}
+% =====================================================================
+
+\textbf{CUDA.} The reference implementation, targeting NVIDIA H100 and
+B200. CUDA is mature, has a rich kernel ecosystem (cuBLAS, CUB, Thrust,
+OptiX-as-library), and provides external-memory and external-semaphore
+interop with Vulkan~\cite{nvidia2020vkcuda}.
+
+\textbf{Triton\slash SYCL.} A second backend in Triton or SYCL would
+demonstrate portability and allow deployment on AMD MI300, Intel Ponte
+Vecchio, and any future accelerator with an LLVM-class compiler.
+
+\textbf{AI-accelerator-native.} TPU (XLA HLO), Trainium (NeuronCore SDK),
+Cerebras, and Groq each have native compilation paths. Lowering rendering
+kernels to these stacks is non-trivial but, for \emph{compute-dominant}
+kernels (3DGS rasterization, BVH traversal), feasible. The rendering
+problem becomes structurally close to a sparse-attention problem, which
+these chips already optimize for.
+
+% =====================================================================
+\section{Evaluation plan}
+% =====================================================================
+
+We will evaluate vkSplat along three axes.
+
+\textbf{Throughput.} Images per second on Mip-NeRF~360, Tanks~\&
+Temples, and Deep Blending scenes. \todo{add SDG-specific scene
+benchmarks: ProcTHOR rooms, Isaac Lab industrial scenes.}
+
+\textbf{Cost \& energy.} Dollars-per-image and joules-per-image on a
+range of accelerators (H100, B200, A100, L40, MI300, TPU~v5e). The L40
+serves as a graphics-hardware baseline; the rest are pure compute.
+
+\textbf{Downstream task accuracy.} Train a small object-detection or
+manipulation policy on data generated by vkSplat vs.\ data generated by
+Isaac~Sim or BlenderProc, controlling for total training compute. The
+hypothesis is that vkSplat data is at least competitive on per-dollar
+performance.
+
+\todo{Specify benchmark scenes, target metrics, and ablation matrix in
+detail.}
+
+% =====================================================================
+\section{Discussion}
+% =====================================================================
+
+\textbf{When does this lose?} If the workload is dominated by
+fixed-function operations (heavy alpha-tested foliage, complex
+post-processing chains, high-fidelity displacement), software renderers
+on compute will pay a large constant factor. Real-time interactive use
+will stay on RTX hardware for the foreseeable future.
+
+\textbf{Why not a new API?} A new graphics API for AI compute has been
+proposed informally many times. The reason to keep Vulkan is ecosystem:
+existing engines (Unreal's Vulkan RHI, Unity, Godot, Filament), tooling
+(RenderDoc, NSight, ImGui), and middleware all speak Vulkan. Reusing
+that surface means a vkSplat backend benefits the ecosystem
+asymmetrically.
+
+\textbf{Strategic implications.} If a viable Vulkan-on-AI-compute path
+exists, the SDG market is no longer constrained by the supply of
+graphics silicon. This is structurally similar to what NVIDIA Omniverse
+does for digital twins, but with the asset-distribution and
+hardware-binding stories inverted: vkSplat is open at the API, neutral
+at the hardware, and assumes a software-defined data center as its
+deployment target. It is also consistent with the direction the
+graphics-hardware industry has been moving for half a decade
+(Section~\ref{sec:dlss}): each successive generation of DLSS-class
+neural reconstruction has shifted more of the rendering pipeline onto
+tensor cores. vkSplat is the architectural endpoint of that
+trajectory --- a renderer in which \emph{all} of the work, seed and
+reconstruction alike, runs on tensor-rich compute, and graphics
+hardware is no longer in the loop.
+
+\textbf{Limitations.} v1 will not be Vulkan-conformant. It will be
+correct on a defined subset, on defined drivers, for defined SDG
+workloads. Conformance is a long-term goal but not a pre-condition for
+usefulness.
+
+% =====================================================================
+\section{Related work, expanded}
+% =====================================================================
+
+\todo{Expand: tile-based GPU rasterization (Liu et al.), differentiable
+rendering (Loper~\&~Black~2014, Li et al.~2018), neural rendering
+surveys, recent 3DGS papers (Mip-Splatting, 2DGS, Spec-Gaussian),
+NVIDIA's CUDA--Vulkan interop sample, ANGLE\slash VKD3D as
+API-translation precedents.}
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+We have argued that synthetic data generation for robotics is the wrong
+workload to be running on graphics-optimized silicon, and that Vulkan is
+the right API to keep. \textbf{vkSplat} is our proposed bridge: a
+software Vulkan implementation whose backend is a compute-only renderer
+on AI accelerators, beginning with a 3D Gaussian Splatting fast path
+and growing toward a full software graphics stack. The position we
+defend is that graphics APIs and graphics hardware should be decoupled,
+and that the SDG market is the place where this decoupling pays off
+first.
+
+\section*{Acknowledgments}
+\todo{Add acknowledgments after collaborators are named.}
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
