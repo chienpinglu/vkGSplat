@@ -63,3 +63,14 @@ assets/*.bin
 .DS_Store
 Thumbs.db
 .git.broken/
+
+# Paper build artifacts
+paper/.build/
+paper/.build.tmp/
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+.git.broken-*/

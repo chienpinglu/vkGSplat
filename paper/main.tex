@@ -11,6 +11,8 @@
 \usepackage{cite}
 \usepackage{xcolor}
 \usepackage{url}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric,backgrounds,fit,calc}
 
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 \newcommand{\note}[1]{\textcolor{blue}{[NOTE: #1]}}
@@ -53,7 +55,16 @@ the silicon turns digital-twin pipelines into a software problem with a clean
 backend interface. We present the system design, situate it relative to
 existing software-Vulkan implementations (SwiftShader, Mesa Lavapipe), justify
 3D Gaussian Splatting as the v1 renderer, and lay out an evaluation plan for
-throughput, energy, and downstream sim-to-real task accuracy. \todo{numbers}
+throughput, energy, and downstream sim-to-real task accuracy. As a
+design target, we aim for \textbf{$\geq 100$ images\slash s\slash H100} at
+$1024{\times}1024$ from a captured 3DGS scene, \textbf{$\leq 0.5$ J\slash
+image} on H100-class hardware, and \textbf{within $2{\times}$ of an
+RTX-class graphics-hardware baseline (L40) on dollars per image} ---
+benchmarked against Isaac~Sim and BlenderProc on identical scene
+geometry. These targets are extrapolations from published 3DGS
+throughput on RTX-class hardware~\cite{kerbl20233dgs} and from the
+software-rasterization literature~\cite{laine2011software}; achieving
+them is the v1 falsifiable claim.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -224,8 +235,45 @@ loop and downstream training pipeline. If a software renderer takes
 solution, it wins on $\$\slash\textrm{image}$ even though it loses on
 frame time.
 
-\todo{Add a table: typical SDG image budgets vs.\ real-time budgets;
-illustrative throughput numbers.}
+Table~\ref{tab:budgets} summarizes the gap between real-time and SDG
+per-image budgets. Real-time renderers operate in single-digit-to-tens
+of milliseconds, with the constraint that exceeding the budget is
+visible to a human user as a dropped frame. SDG pipelines are sized by
+the dataset they need to deliver: a typical robotics training run
+consumes between $10^5$ and $10^7$ labeled images, the renderer is
+allowed minutes per image if necessary, and the binding constraint is
+total wall-clock time, dollars, or joules to produce the dataset
+rather than per-image latency.
+
+\begin{table}[t]
+\centering
+\caption{Per-image budgets, real-time vs.\ SDG. Real-time numbers are
+the minimum frame budgets needed to avoid visible drops; SDG numbers
+are the upper bounds at which a typical training run remains
+practical. The relevant figure of merit shifts from \emph{latency} to
+\emph{aggregate throughput per dollar / per joule}.}
+\label{tab:budgets}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+& \textbf{Real-time} & \textbf{SDG} \\
+\midrule
+Per-image budget         & $\leq 16.7$ ms (60\,Hz) & $10^2$--$10^4$ ms \\
+                         & $\leq 11.1$ ms (90\,Hz VR)  & \\
+Tolerable variance       & low (jitter visible)        & high \\
+Resolution               & 1080p--4K display-bound     & 256$^2$--1024$^2$ \\
+Images per run           & $\sim$1 (continuous)        & $10^5$--$10^7$ \\
+Dominant constraint      & per-frame latency           & throughput, \$\slash img \\
+Hardware preference      & raster + RT cores           & whatever has FLOPS \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A renderer that produces a $1024{\times}1024$ image in 50~ms is
+unusable for real-time, but on a single H100 it would deliver roughly
+$1.7{\times}10^6$ images per day. At the same throughput, a 16-GPU pod
+produces a 27~M-image dataset per day, which exceeds the size of every
+publicly released robotics training dataset to date.
 
 \subsection{Quality requirements}
 
@@ -241,15 +289,61 @@ unrealistic asset library.
 
 \subsection{Hardware availability and cost}
 
-\todo{Add a quantitative argument: aggregate H100\slash B200\slash TPU
-FLOPS available globally vs.\ aggregate L40\slash RTX-6000-Ada FLOPS;
-spot pricing per FLOP\slash s\slash dollar; energy per image budget.}
+Table~\ref{tab:hardware} compares the compute economics of the
+graphics-class silicon SDG normally targets against the AI-accelerator
+silicon teams already own. Two effects compound. First, the
+graphics-class lineup (L40, RTX 6000 Ada) ships in much smaller
+volumes than the data-center training accelerators: NVIDIA's H100
+shipments alone exceeded an estimated three to four million units in
+2024, while the L40\slash L40S\slash RTX 6000 Ada production volume is
+smaller by roughly an order of magnitude. Second, on a per-unit basis
+H100 and B200 deliver $4$--$10{\times}$ more raw FLOPS per dollar of
+spot-market rental than graphics-class
+parts~\cite{nvidia-hopper-h100,nvidia-blackwell-b200}.
 
-The qualitative point is that any team that wants to do SDG today is
-either competing with rendering studios for L40s and RTX 6000 Adas, or
-running their renderer on consumer hardware that is unstable in
-data-center deployments. AI compute is, in contrast, the silicon those
-teams already have purchased for training.
+\begin{table}[t]
+\centering
+\caption{Illustrative per-device specifications and rough order-of-magnitude
+spot-market prices~\cite{nvidia-hopper-h100,nvidia-blackwell-b200,nvidia-l40,google-tpu-v5}.
+TFLOPS columns report dense BF16\slash FP16 throughput (the regime SDG
+kernels run in), not sparse or FP8. Spot prices are illustrative and
+fluctuate; we report them only to anchor the cross-class ratios.}
+\label{tab:hardware}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \textbf{TFLOPS} & \textbf{HBM/Mem} & \textbf{TDP} & \textbf{Spot \$/hr} \\
+& \textit{(BF16)} & (GB) & (W) & \textit{(rough)} \\
+\midrule
+\textit{AI-accelerator class} & & & & \\
+NVIDIA H100 SXM   &  $\sim$990  & 80   & 700  & 2--4  \\
+NVIDIA B200       & $\sim$2{,}500 & 192 & 1000 & 4--8  \\
+Google TPU v5e    &  $\sim$200  & 16   & 170  & 1--2  \\
+AWS Trainium2     &  $\sim$1{,}300 & 96 & ---  & 1--3  \\
+\midrule
+\textit{Graphics class}       & & & & \\
+NVIDIA L40\,/\,L40S         &  $\sim$360  & 48   & 300  & 1--2 \\
+NVIDIA RTX 6000 Ada         &  $\sim$364  & 48   & 300  & 1--2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The qualitative point survives any uncertainty in the absolute numbers.
+A team that wants to do SDG today is either provisioning a separate
+fleet of graphics-class GPUs (competing with rendering studios for a
+constrained supply), or running on consumer hardware (RTX 4090, 5090)
+that is unstable in data-center deployments. AI compute, by contrast,
+is the silicon those teams already operate at scale for training. If
+the renderer can run there, the marginal cost of the SDG run is the
+opportunity cost of pre-existing capacity rather than the capex of a
+new fleet.
+
+A back-of-envelope energy budget reinforces the argument. At a 50-ms
+target image budget on an 80\% utilized H100 (700~W TDP), the
+rendering energy cost per image is roughly $0.3$~J. At
+$10^7$ images, that is $\sim 0.8$ kWh of rendering work --- a
+rounding error against the multi-megawatt-hour cost of training the
+downstream model.
 
 \subsection{The DLSS precedent: tensor compute is already where the
 rendering value lives}\label{sec:dlss}
@@ -313,8 +407,83 @@ redrawn accordingly.
 \section{System design}\label{sec:design}
 % =====================================================================
 
-vkSplat is structured as three layers
-(Fig.~\ref{fig:arch})\todo{draw figure}:
+vkSplat is structured as three layers (Fig.~\ref{fig:arch}):
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    font=\footnotesize,
+    box/.style    ={draw, rounded corners=2pt, align=center,
+                    minimum width=6.4cm, minimum height=0.85cm,
+                    inner sep=2pt},
+    sub/.style    ={draw, rounded corners=1pt, align=center,
+                    minimum width=1.85cm, minimum height=0.65cm,
+                    inner sep=1pt, font=\scriptsize},
+    arrow/.style  ={-Latex, thick},
+    layerlabel/.style={font=\scriptsize\itshape, anchor=west}
+]
+% --- top: applications ---
+\node[box, fill=black!5] (apps) {Vulkan applications\\ \scriptsize Isaac Sim, BlenderProc, custom robotics SDG harnesses};
+
+% --- layer 1: front-end ---
+\node[box, fill=blue!8, below=0.55cm of apps] (vk) {%
+    \textbf{Vulkan front-end (ICD)}\\
+    \scriptsize subset of Vulkan 1.3 + RT + external memory
+};
+
+% --- layer 2: IR ---
+\node[box, fill=green!8, below=0.55cm of vk] (ir) {%
+    \textbf{Compute IR}\\
+    \scriptsize SPIR-V $\to$ LLVM/MLIR; command buffer record \& replay
+};
+
+% --- layer 3: backends, three side by side ---
+\node[sub, fill=orange!12, below=0.55cm of ir, xshift=-2.1cm] (cuda) {CUDA\\\scriptsize H100,B200};
+\node[sub, fill=orange!12, right=0.18cm of cuda] (triton) {Triton\,/\,SYCL\\\scriptsize MI300, PVC};
+\node[sub, fill=orange!12, right=0.18cm of triton] (ainative) {AI-native\\\scriptsize TPU, Trainium};
+
+% --- bracket label for backends ---
+\node[layerlabel, left=0.1cm of cuda, anchor=east, align=right]
+    {\textbf{Compute}\\\textbf{backends}};
+
+% --- kernel modules below backends ---
+\node[box, fill=red!6, below=0.55cm of triton, minimum width=6.4cm] (kernels)
+    {\textbf{Rendering kernels}\\%
+     \scriptsize 3DGS rasterizer~|~tile-based software raster~|~BVH ray traversal~|~shadow / denoise};
+
+% --- silicon ---
+\node[box, fill=gray!8, below=0.55cm of kernels] (hw)
+    {\textbf{AI-accelerator silicon}\\\scriptsize tensor\,/\,SIMT compute, HBM, NVLink};
+
+% --- arrows down ---
+\draw[arrow] (apps) -- node[right]{\scriptsize Vulkan API} (vk);
+\draw[arrow] (vk)   -- node[right]{\scriptsize SPIR-V + cmd buffers} (ir);
+\draw[arrow] (ir.south) -- ++(0,-0.18) -| (cuda.north);
+\draw[arrow] (ir.south) -- ++(0,-0.18) -| (triton.north);
+\draw[arrow] (ir.south) -- ++(0,-0.18) -| (ainative.north);
+\draw[arrow] (cuda.south)    |- ($(kernels.north)+(0,0.12)$) -- (kernels.north);
+\draw[arrow] (triton.south)  -- (kernels.north);
+\draw[arrow] (ainative.south)|- ($(kernels.north)+(0,0.12)$) -- (kernels.north);
+\draw[arrow] (kernels) -- (hw);
+
+% --- side annotation: existing graphics path crossed out ---
+\node[draw, dashed, rounded corners=2pt, align=center, font=\scriptsize,
+      right=0.45cm of vk, fill=gray!5, minimum height=2.7cm, text width=2.0cm]
+      (notused)
+      {\emph{Bypassed:}\\rasterizer\\ROPs\\RT cores};
+\draw[dashed,gray] (vk.east) -- (notused.west);
+
+\end{tikzpicture}
+\caption{vkSplat architecture. Applications retain the standard Vulkan
+API; the implementation lowers SPIR-V and command buffers to a
+backend-agnostic compute IR (LLVM\,/\,MLIR), which is dispatched to
+CUDA, Triton\,/\,SYCL, or AI-accelerator-native backends. The
+rendering kernels --- 3DGS rasterizer, software tile rasterizer,
+BVH ray traversal, denoising --- run as compute on tensor- and
+SIMT-rich silicon. The fixed-function graphics path on the GPU is
+not used.}
+\label{fig:arch}
+\end{figure}
 
 \begin{enumerate}
     \item \textbf{Vulkan front-end.} A Vulkan loadable ICD that
@@ -401,9 +570,17 @@ these chips already optimize for.
 
 We will evaluate vkSplat along three axes.
 
-\textbf{Throughput.} Images per second on Mip-NeRF~360, Tanks~\&
-Temples, and Deep Blending scenes. \todo{add SDG-specific scene
-benchmarks: ProcTHOR rooms, Isaac Lab industrial scenes.}
+\textbf{Throughput.} Images per second at $512^2$ and $1024^2$
+resolution on three scene families:
+(i)~the standard novel-view-synthesis benchmarks --- Mip-NeRF~360,
+Tanks~\& Temples, Deep Blending --- to permit comparison with
+published 3DGS numbers~\cite{kerbl20233dgs};
+(ii)~SDG-typical procedural scenes from ProcTHOR~\cite{deitke2022procthor}
+and a representative subset of Isaac~Lab industrial-manipulation
+environments, rendered with controlled domain randomization;
+and (iii)~hybrid scenes consisting of a 3DGS-captured real environment
+populated with synthetic foreground objects, which is the natural SDG
+flow vkSplat is built for.
 
 \textbf{Cost \& energy.} Dollars-per-image and joules-per-image on a
 range of accelerators (H100, B200, A100, L40, MI300, TPU~v5e). The L40
@@ -415,8 +592,44 @@ Isaac~Sim or BlenderProc, controlling for total training compute. The
 hypothesis is that vkSplat data is at least competitive on per-dollar
 performance.
 
-\todo{Specify benchmark scenes, target metrics, and ablation matrix in
-detail.}
+Concretely, Table~\ref{tab:eval} fixes the matrix we will report.
+Each cell is a (scene family, hardware, backend, renderer)
+configuration; we report throughput, $\$\slash\textrm{image}$, and
+$\textrm{J}\slash\textrm{image}$ as the primary metrics, with PSNR /
+SSIM / LPIPS against held-out reference renders for image quality.
+Downstream task accuracy is reported on a single curated robotics
+benchmark (object-detection mAP on a held-out test set, plus a small
+manipulation-policy success rate) rather than chasing a long tail of
+benchmarks; the goal is to falsify the hypothesis ``models trained on
+vkSplat data are competitive per dollar with models trained on
+Isaac~Sim or BlenderProc data,'' not to exhaustively characterize
+sim-to-real transfer.
+
+\begin{table}[t]
+\centering
+\caption{Evaluation matrix. Each axis is independently varied; the
+full Cartesian product is not run --- we ablate one axis at a time
+against a reference configuration of \{H100, CUDA, 3DGS,
+hybrid 3DGS+synthetic\}.}
+\label{tab:eval}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Axis} & \textbf{Levels} \\
+\midrule
+Hardware  & H100, B200, A100, L40S, MI300, TPU v5e \\
+Backend   & CUDA (ref), Triton, SYCL, XLA HLO (TPU) \\
+Renderer  & 3DGS, software raster, software RT \\
+Scene     & Mip-NeRF 360, T\&T, Deep Blending,\\
+          & ProcTHOR, Isaac Lab, hybrid 3DGS+CAD \\
+Resolution & $512^2$, $1024^2$ \\
+\midrule
+Metrics   & throughput (img/s), \$/img, J/img, \\
+          & PSNR / SSIM / LPIPS, \\
+          & downstream mAP, manipulation success \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % =====================================================================
 \section{Discussion}
@@ -459,11 +672,57 @@ usefulness.
 \section{Related work, expanded}
 % =====================================================================
 
-\todo{Expand: tile-based GPU rasterization (Liu et al.), differentiable
-rendering (Loper~\&~Black~2014, Li et al.~2018), neural rendering
-surveys, recent 3DGS papers (Mip-Splatting, 2DGS, Spec-Gaussian),
-NVIDIA's CUDA--Vulkan interop sample, ANGLE\slash VKD3D as
-API-translation precedents.}
+\textbf{Software rasterization.} Beyond the canonical Laine \&
+Karras~\cite{laine2011software} result, FreePipe~\cite{liu2010freepipe}
+demonstrated programmable parallel rasterization with multi-fragment
+effects on GPUs, and Patney \& Owens~\cite{patney2010real} explored
+adaptive subdivision on compute. These results predate the modern
+tensor-core era but already establish that software-on-compute
+rasterization is competitive on workloads where rasterization is not
+the bottleneck --- the regime SDG sits in.
+
+\textbf{Differentiable rendering.}
+OpenDR~\cite{loper2014opendr} demonstrated that classical rasterizers
+could be made approximately differentiable; Li et
+al.~\cite{li2018edge} extended this to physically-based path tracing
+with edge sampling. The same underlying compute substrate that powers
+vkSplat could host a differentiable variant in future work, allowing
+SDG runs to feed gradients back into asset placement or material
+parameters.
+
+\textbf{Neural rendering surveys.} Tewari et al.~\cite{tewari2022advances}
+surveys the broader space of neural rendering and clarifies that
+3DGS sits within a continuum of explicit and implicit
+representations. The defining property we exploit ---
+compute-native rendering with no fixed-function dependencies --- is
+shared with NeRF~\cite{mildenhall2020nerf} and Instant
+NGP~\cite{mueller2022instant}, but 3DGS achieves rasterization speeds
+that NeRF-class methods do not, which is why we choose it as the v1
+renderer.
+
+\textbf{3DGS extensions.} Mip-Splatting~\cite{yu2024mip}
+addresses anti-aliasing across scale; 2DGS~\cite{huang20242dgs}
+substitutes 2D primitives for tighter geometric fidelity; and
+Spec-Gaussian~\cite{yang2024specgaussian} adds anisotropic specular
+appearance. vkSplat targets the original 3DGS forward path first;
+incorporating these variants is straightforward because all of them
+remain compute-only.
+
+\textbf{API translation precedents.} ANGLE~\cite{angle} translates
+OpenGL ES to Direct3D, Metal, or Vulkan, and is the basis for
+Chromium's WebGL implementation. VKD3D-Proton~\cite{vkd3dproton}
+translates Direct3D~12 to Vulkan and is the engine that allows recent
+Windows games to run on Linux under Proton. Both establish that a
+shipped, correctness-targeted graphics-API translation layer is
+feasible at production scale. vkSplat's translation goes one step
+further by changing not only the API but also the execution
+substrate.
+
+\textbf{CUDA--Vulkan interop.} NVIDIA's reference interop
+samples~\cite{nvidia2020vkcuda} demonstrate the external-memory and
+external-semaphore patterns vkSplat reuses where the renderer needs
+to share images with a Vulkan presentation engine for debug viewers,
+even though the production SDG path is headless.
 
 % =====================================================================
 \section{Conclusion}
@@ -480,7 +739,14 @@ and that the SDG market is the place where this decoupling pays off
 first.
 
 \section*{Acknowledgments}
-\todo{Add acknowledgments after collaborators are named.}
+The author thanks the maintainers of the open-source projects this
+proposal builds on --- the original 3D Gaussian Splatting team, the
+Mesa Lavapipe and SwiftShader communities, the Mitsuba\,/\,Dr.Jit
+authors, and the Embree and OptiX teams --- whose work makes the
+position defended here a credible engineering target rather than a
+speculation. The framing of the DLSS argument owes a debt to the body
+of NVIDIA technical writing on real-time neural reconstruction; the
+errors in interpreting it are the author's alone.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}
