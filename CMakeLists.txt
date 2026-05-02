@@ -62,6 +62,14 @@ add_subdirectory(apps/viewer)
 enable_testing()
 add_subdirectory(tests)
 
+# --- tinycudarenderer (Vulkan-on-CUDA proof of concept) --------------------
+option(VKSPLAT_BUILD_TINYCUDARENDERER
+    "Build the tinycudarenderer sandbox (CPU + CUDA + minimal Vulkan-on-CUDA driver)"
+    ON)
+if(VKSPLAT_BUILD_TINYCUDARENDERER)
+    add_subdirectory(tinycudarenderer)
+endif()
+
 # --- Status ----------------------------------------------------------------
 message(STATUS "vkSplat ${PROJECT_VERSION}")
 message(STATUS "  Vulkan : ${Vulkan_VERSION} (${Vulkan_LIBRARY})")
