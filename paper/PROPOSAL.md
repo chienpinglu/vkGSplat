@@ -97,7 +97,7 @@ v2 / v3.
 
 ## What I want next
 
-1. Refereed feedback on the position paper (`paper/main.tex`).
+1. Refereed feedback on the position paper (`paper/vkSplat.tex`).
 2. A small prototype of the 3DGS + minimal-Vulkan front-end on H100,
    targeting one Mip-NeRF 360 scene end-to-end.
 3. Collaborators who care about the SDG-on-AI-compute thesis.

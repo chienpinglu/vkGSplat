@@ -159,6 +159,34 @@ std::vector<std::uint32_t> global_invocation_id_spirv() {
     return words;
 }
 
+std::vector<std::uint32_t> push_constant_interface_spirv() {
+    std::vector<std::uint32_t> words = {
+        vksplat::spirv::kMagic,
+        0x00010500u,
+        0u,
+        12u,
+        0u,
+    };
+
+    push_inst(words, 17, { 1 }); // OpCapability Shader
+    push_inst(words, 14, { 0, 1 }); // OpMemoryModel Logical GLSL450
+    push_inst(words, 15, { 5, 1, str_word("main") }); // OpEntryPoint GLCompute %1 "main"
+    push_inst(words, 5, { 9, str_word("pc") }); // OpName %9 "pc"
+    push_inst(words, 71, { 7, 2 }); // OpDecorate %7 Block
+    push_inst(words, 72, { 7, 0, 35, 0 }); // OpMemberDecorate %7 0 Offset 0
+    push_inst(words, 19, { 2 }); // OpTypeVoid %2
+    push_inst(words, 33, { 3, 2 }); // OpTypeFunction %3 %2
+    push_inst(words, 21, { 4, 32, 0 }); // OpTypeInt %4 32 0
+    push_inst(words, 30, { 7, 4 }); // OpTypeStruct %7 %4
+    push_inst(words, 32, { 8, 9, 7 }); // OpTypePointer %8 PushConstant %7
+    push_inst(words, 59, { 8, 9, 9 }); // OpVariable %8 %9 PushConstant
+    push_inst(words, 54, { 2, 1, 0, 3 }); // OpFunction %2 %1 None %3
+    push_inst(words, 248, { 10 }); // OpLabel %10
+    push_inst(words, 253, {}); // OpReturn
+    push_inst(words, 56, {}); // OpFunctionEnd
+    return words;
+}
+
 std::vector<std::uint32_t> ray_query_spirv() {
     std::vector<std::uint32_t> words = {
         vksplat::spirv::kMagic,
@@ -331,6 +359,23 @@ int main() {
 
     const std::string access_c = translate_to_c(access_module);
     const std::string access_cuda = translate_to_cuda(access_module);
+    const KernelInterface access_interface = describe_kernel_interface(access_module);
+    const std::string access_manifest = format_kernel_interface_json(access_interface);
+    if (access_interface.entry_point != "main" ||
+        access_interface.execution_model != ExecutionModel::GLCompute ||
+        access_interface.parameters.size() != 2 ||
+        access_interface.parameters[0].name != "src" ||
+        access_interface.parameters[0].c_type != "uint32_t*" ||
+        !access_interface.parameters[0].has_descriptor_set ||
+        access_interface.parameters[0].descriptor_set != 0 ||
+        !access_interface.parameters[1].has_binding ||
+        access_interface.parameters[1].binding != 1 ||
+        !contains(access_manifest, "\"storage_class\": \"storage_buffer\"") ||
+        !contains(access_manifest, "\"binding\": 1")) {
+        std::fprintf(stderr, "SPIR-V kernel interface manifest is wrong:\n%s\n",
+                     access_manifest.c_str());
+        return 1;
+    }
     if (!contains(access_c, "void main(uint32_t* src, uint32_t* dst)") ||
         !contains(access_c, "dst[1u] = (src[0u] + 2u);")) {
         std::fprintf(stderr, "C translation did not lower access-chain load/add/store:\n%s\n",
@@ -354,6 +399,13 @@ int main() {
 
     const std::string gid_c = translate_to_c(gid_module);
     const std::string gid_cuda = translate_to_cuda(gid_module);
+    const KernelInterface gid_interface = describe_kernel_interface(gid_module);
+    if (!gid_interface.uses_global_invocation_id ||
+        gid_interface.parameters.size() != 1 ||
+        gid_interface.parameters[0].name != "dst") {
+        std::fprintf(stderr, "SPIR-V kernel interface did not expose builtin dispatch state\n");
+        return 1;
+    }
     if (!contains(gid_c, "uint32_t global_invocation_id_x") ||
         !contains(gid_c, "dst[0] = global_invocation_id_x;")) {
         std::fprintf(stderr, "C translation did not lower GlobalInvocationId:\n%s\n", gid_c.c_str());
@@ -363,6 +415,18 @@ int main() {
         !contains(gid_cuda, "dst[0] = ((uint32_t)(blockIdx.x * blockDim.x + threadIdx.x));")) {
         std::fprintf(stderr, "CUDA translation did not lower GlobalInvocationId:\n%s\n",
                      gid_cuda.c_str());
+        return 1;
+    }
+
+    const Module pc_module = parse_module(push_constant_interface_spirv());
+    const KernelInterface pc_interface = describe_kernel_interface(pc_module);
+    const std::string pc_manifest = format_kernel_interface_json(pc_interface);
+    if (pc_interface.parameters.size() != 1 ||
+        pc_interface.parameters[0].name != "pc" ||
+        pc_interface.parameters[0].storage_class != StorageClass::PushConstant ||
+        !contains(pc_manifest, "\"storage_class\": \"push_constant\"")) {
+        std::fprintf(stderr, "SPIR-V kernel interface did not expose push constants:\n%s\n",
+                     pc_manifest.c_str());
         return 1;
     }
 
@@ -378,6 +442,14 @@ int main() {
 
     const std::string ray_c = translate_to_c(ray_module);
     const std::string ray_cuda = translate_to_cuda(ray_module);
+    const KernelInterface ray_interface = describe_kernel_interface(ray_module);
+    if (ray_interface.parameters.size() != 2 ||
+        ray_interface.parameters[0].name != "tlas" ||
+        ray_interface.parameters[0].c_type != "const void*" ||
+        ray_interface.parameters[0].storage_class != StorageClass::UniformConstant) {
+        std::fprintf(stderr, "SPIR-V kernel interface did not expose TLAS resource\n");
+        return 1;
+    }
     if (!contains(ray_c, "void main(const void* tlas, uint32_t* hit)") ||
         !contains(ray_c, "vksplat_ray_query rq = { 0u, 0u };") ||
         !contains(ray_c, "vksplat_ray_query_initialize(&rq, tlas, 0u, 255u") ||

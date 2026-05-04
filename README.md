@@ -12,7 +12,7 @@ or RT cores. The target workload is **synthetic data generation for
 robotics** — throughput-bound, latency-tolerant, consumed by a learned model
 rather than a human eye.
 
-The position the project defends is laid out in `paper/main.tex` and
+The position the project defends is laid out in `paper/vkSplat.tex` and
 summarized in `paper/PROPOSAL.md`. **Read those first.** The short version:
 DLSS-style rendering has already moved most of the real-time pipeline off
 fixed-function graphics units onto tensor cores. vkSplat is the architectural
@@ -62,7 +62,7 @@ A `tinyrender/` scratch sandbox lives next to this repo for prototype spikes.
 
 ## Roadmap
 
-1. **Paper.** Land the position argument (`paper/main.tex`) and circulate.
+1. **Paper.** Land the position argument (`paper/vkSplat.tex`) and circulate.
 2. **Vulkan capture contract.** Capture SPIR-V, frame resources, camera state,
    depth, primitive identity, and adjacent-frame metadata from real Vulkan
    programs.

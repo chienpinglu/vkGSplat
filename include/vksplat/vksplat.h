@@ -3,7 +3,7 @@
 // vkSplat — umbrella header. Application code can `#include
 // <vksplat/vksplat.h>` to pull in the public surface.
 //
-// The position paper (paper/main.tex) and architecture notes
+// The position paper (paper/vkSplat.tex) and architecture notes
 // (docs/architecture.md) are the canonical references for the design.
 #pragma once
 

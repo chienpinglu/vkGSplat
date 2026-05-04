@@ -23,7 +23,7 @@ the recorded commands and translates each one into a CUDA call into
 that shim.
 
 This is exactly the structure the position paper at
-`../../paper/main.tex` proposes for the production vkSplat
+`../../paper/vkSplat.tex` proposes for the production vkSplat
 implementation, in 200 lines instead of 20,000.
 
 ## What is "minimal Vulkan API support"?

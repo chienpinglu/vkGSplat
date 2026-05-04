@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace vksplat::spirv {
@@ -138,8 +139,10 @@ std::vector<Variable> interface_variables(const Analysis& analysis) {
     std::vector<Variable> variables;
     for (const auto& [_, variable] : analysis.variables) {
         if (variable.storage_class == StorageClass::CrossWorkgroup ||
+            variable.storage_class == StorageClass::Uniform ||
             variable.storage_class == StorageClass::StorageBuffer ||
-            variable.storage_class == StorageClass::UniformConstant) {
+            variable.storage_class == StorageClass::UniformConstant ||
+            variable.storage_class == StorageClass::PushConstant) {
             variables.push_back(variable);
         }
     }
@@ -179,6 +182,31 @@ std::string parameter_list(const Analysis& analysis, Target target) {
         if (emitted) out << ", ";
         out << "uint32_t global_invocation_id_x, uint32_t global_invocation_id_y, "
                "uint32_t global_invocation_id_z";
+    }
+    return out.str();
+}
+
+std::string json_escape(const std::string& value) {
+    std::ostringstream out;
+    for (char c : value) {
+        switch (c) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20u) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<unsigned int>(static_cast<unsigned char>(c))
+                        << std::dec << std::setfill(' ');
+                } else {
+                    out << c;
+                }
+                break;
+        }
     }
     return out.str();
 }
@@ -416,6 +444,70 @@ void emit_lowered_body(std::ostringstream& out,
 }
 
 } // namespace
+
+KernelInterface describe_kernel_interface(const Module& module,
+                                          const TranslationOptions& options) {
+    const EntryPoint& ep = first_entry_point(module);
+    const Analysis analysis = analyze_module(module);
+
+    KernelInterface interface;
+    interface.entry_point = sanitize_identifier(ep.name, options.module_name);
+    interface.execution_model = ep.execution_model;
+    interface.uses_global_invocation_id = has_global_invocation_id(analysis);
+
+    const std::vector<Variable> variables = interface_variables(analysis);
+    interface.parameters.reserve(variables.size());
+    for (const Variable& variable : variables) {
+        KernelParameter parameter;
+        parameter.variable_id = variable.id;
+        parameter.name = id_name(variable.id, analysis, "ptr_");
+        parameter.c_type = parameter_type(variable, analysis);
+        parameter.storage_class = variable.storage_class;
+        parameter.has_descriptor_set = variable.has_descriptor_set;
+        parameter.descriptor_set = variable.descriptor_set;
+        parameter.has_binding = variable.has_binding;
+        parameter.binding = variable.binding;
+        interface.parameters.push_back(std::move(parameter));
+    }
+
+    return interface;
+}
+
+std::string format_kernel_interface_json(const KernelInterface& interface) {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"entry_point\": \"" << json_escape(interface.entry_point) << "\",\n";
+    out << "  \"execution_model\": \"" << execution_model_name(interface.execution_model) << "\",\n";
+    out << "  \"uses_global_invocation_id\": "
+        << (interface.uses_global_invocation_id ? "true" : "false") << ",\n";
+    out << "  \"parameters\": [\n";
+    for (std::size_t i = 0; i < interface.parameters.size(); ++i) {
+        const KernelParameter& parameter = interface.parameters[i];
+        out << "    {\n";
+        out << "      \"variable_id\": " << parameter.variable_id << ",\n";
+        out << "      \"name\": \"" << json_escape(parameter.name) << "\",\n";
+        out << "      \"c_type\": \"" << json_escape(parameter.c_type) << "\",\n";
+        out << "      \"storage_class\": \"" << storage_class_name(parameter.storage_class) << "\",\n";
+        out << "      \"descriptor_set\": ";
+        if (parameter.has_descriptor_set) {
+            out << parameter.descriptor_set;
+        } else {
+            out << "null";
+        }
+        out << ",\n";
+        out << "      \"binding\": ";
+        if (parameter.has_binding) {
+            out << parameter.binding;
+        } else {
+            out << "null";
+        }
+        out << "\n";
+        out << "    }" << (i + 1 == interface.parameters.size() ? "\n" : ",\n");
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.str();
+}
 
 std::string translate_to_c(const Module& module, const TranslationOptions& options) {
     const EntryPoint& ep = first_entry_point(module);
