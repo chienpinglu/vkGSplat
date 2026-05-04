@@ -234,11 +234,8 @@ void Rasterizer::bind_to_device_uuid(const std::array<unsigned char, 16>& uuid) 
 
 namespace vksplat {
 
-std::unique_ptr<Renderer> make_renderer(std::string_view backend_name) {
-    if (backend_name == "cuda") {
-        return std::make_unique<cuda::Rasterizer>();
-    }
-    return nullptr;
+std::unique_ptr<Renderer> make_cuda_renderer() {
+    return std::make_unique<cuda::Rasterizer>();
 }
 
 } // namespace vksplat

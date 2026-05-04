@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// vksplat_viewer — minimal CLI that loads a scene, builds the CUDA
-// renderer, and produces a single image to stdout (or to a PNG with
-// --output). The interactive swapchain path is staged but disabled in
-// v1; the production SDG flow is headless.
+// vksplat_viewer — minimal CLI that loads a scene, builds a renderer,
+// and produces a single headless image. The interactive swapchain path
+// is staged but disabled in v1; the production SDG flow is headless.
 
 #include <vksplat/vksplat.h>
 
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
 struct Args {
     std::filesystem::path scene_path;
-    std::filesystem::path output_path = "out.png";
+    std::filesystem::path output_path = "out.ppm";
+    std::string           backend = "cpp";
     std::uint32_t width  = 1024;
     std::uint32_t height = 1024;
     bool          present = false;
@@ -27,7 +29,8 @@ struct Args {
 [[noreturn]] void usage(const char* argv0) {
     std::fprintf(stderr,
         "usage: %s <scene.ply|scene.splat> [options]\n"
-        "  --output <path.png>   write rendered image (default: out.png)\n"
+        "  --backend <name>      renderer backend: cpp/cpu/reference/cuda (default: cpp)\n"
+        "  --output <path.ppm>   write rendered image (default: out.ppm)\n"
         "  --size W H            output resolution (default: 1024 1024)\n"
         "  --present             open a debug swapchain (not supported in v1)\n"
         "  --dump-caps           dump Vulkan instance capabilities and exit\n",
@@ -40,6 +43,7 @@ Args parse(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string s = argv[i];
         if (s == "--help" || s == "-h") usage(argv[0]);
+        else if (s == "--backend" && i + 1 < argc) a.backend = argv[++i];
         else if (s == "--output" && i + 1 < argc) a.output_path = argv[++i];
         else if (s == "--size" && i + 2 < argc) {
             a.width  = static_cast<std::uint32_t>(std::atoi(argv[++i]));
@@ -53,14 +57,41 @@ Args parse(int argc, char** argv) {
     return a;
 }
 
+bool write_ppm(const std::filesystem::path& path,
+               std::uint32_t width,
+               std::uint32_t height,
+               const std::vector<std::uint8_t>& rgba) {
+    FILE* f = std::fopen(path.string().c_str(), "wb");
+    if (!f) {
+        return false;
+    }
+    std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * width + x) * 4;
+            const std::uint8_t rgb[3] = { rgba[i + 0], rgba[i + 1], rgba[i + 2] };
+            if (std::fwrite(rgb, sizeof(rgb), 1, f) != 1) {
+                std::fclose(f);
+                return false;
+            }
+        }
+    }
+    return std::fclose(f) == 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const Args args = parse(argc, argv);
 
     if (args.dump_caps) {
+#if defined(VKSPLAT_ENABLE_VULKAN)
         vksplat::vk::dump_instance_capabilities();
         return 0;
+#else
+        std::fprintf(stderr, "[vksplat] Vulkan support is not available in this build\n");
+        return 1;
+#endif
     }
     if (args.scene_path.empty()) usage(argv[0]);
 
@@ -76,16 +107,23 @@ int main(int argc, char** argv) {
                            0.1f, 1000.0f);
     camera.look_at({ 0.0f, 0.0f, 3.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
 
-    auto renderer = vksplat::make_renderer("cuda");
+    auto renderer = vksplat::make_renderer(args.backend);
     if (!renderer) {
-        std::fprintf(stderr, "[vksplat] CUDA backend not available in this build\n");
+        std::fprintf(stderr, "[vksplat] backend '%s' is not available in this build\n",
+                     args.backend.c_str());
         return 1;
     }
+    std::fprintf(stderr, "[vksplat] backend: %.*s\n",
+                 static_cast<int>(renderer->backend_name().size()),
+                 renderer->backend_name().data());
     renderer->upload(scene);
+
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(args.width) * args.height * 4);
 
     vksplat::RenderTarget target;
     target.kind = vksplat::RenderTargetKind::HOST_BUFFER;
     target.desc = { args.width, args.height, vksplat::PixelFormat::R8G8B8A8_UNORM, 1, 1 };
+    target.user_handle = pixels.data();
 
     vksplat::RenderParams params;
     params.deterministic = true;
@@ -93,6 +131,12 @@ int main(int argc, char** argv) {
 
     const auto frame = renderer->render(camera, params, target);
     renderer->wait(frame);
+
+    if (!write_ppm(args.output_path, args.width, args.height, pixels)) {
+        std::fprintf(stderr, "[vksplat] failed to write output image: %s\n",
+                     args.output_path.string().c_str());
+        return 1;
+    }
 
     std::fprintf(stderr, "[vksplat] frame %llu rendered (%ux%u) -> %s\n",
                  static_cast<unsigned long long>(frame),

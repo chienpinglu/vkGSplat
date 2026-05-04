@@ -131,6 +131,16 @@ on the same tensor-rich silicon, and eliminate the dependence on
 graphics-specific units altogether. For SDG, where real-time interaction
 is unnecessary, this trade is straightforward.
 
+This does not require vkSplat to clone DLSS. DLSS is the precedent that
+motivates moving reconstruction work onto compute, not a required
+implementation dependency. The near-term vkSplat stack now prioritizes
+Vulkan/SPIR-V capture, low-sample ray-tracing seed frames, classical
+temporal reprojection, history rejection, TAA, and denoising. 3D
+Gaussian Splatting remains an optional backend and research
+representation, but it is not on the default implementation path. A
+learned DLSS-like temporal reconstruction model is reserved for optional
+later research if these deterministic passes prove insufficient.
+
 \textbf{Contributions.} This is a position paper introducing the
 \textbf{vkSplat} project. We make four claims:
 
@@ -147,12 +157,14 @@ is unnecessary, this trade is straightforward.
     compute-only software renderer. We outline the architecture of such
     an implementation (Section~\ref{sec:design}).
 
-    \item \textbf{3DGS-first renderer.} 3D Gaussian
-    Splatting~\cite{kerbl20233dgs} is the natural v1 renderer because it
-    is already compute-native: no rasterizer, no ROPs, no RT cores
-    required. We argue this lets the project ship a usable system before
-    tackling the harder problem of lowering classical raster and ray
-    tracing (Section~\ref{sec:v1}).
+    \item \textbf{Ray-tracing seed path before 3DGS.}
+    The active v1 implementation targets low-sample, Vulkan-ray-tracing
+    shaped seed frames before returning to 3DGS. This keeps the project
+    focused on taking existing Vulkan programs, preserving SPIR-V and
+    camera/depth/primitive contracts, and lowering reconstruction work
+    to CUDA-friendly tile kernels. The earlier tile-based 3DGS renderer
+    remains available as an optional backend, but no longer gates the
+    main milestones (Section~\ref{sec:v1}).
 
     \item \textbf{Hardware-agnostic backend.} The compute IR underlying
     the renderer can be retargeted from CUDA to SYCL, Triton, or
@@ -165,6 +177,27 @@ display-bound interactive workloads. We do not claim to outperform RTX
 hardware on its own ground. We claim only that, for the SDG workload,
 running graphics on AI compute is viable, economically attractive, and
 strategically preferable.
+
+\textbf{Prototype status.} The current implementation is deliberately
+CPU-first while preserving the CUDA target. It includes a portable
+Wicked Engine Vulkan capture harness, restricted SPIR-V analysis and
+C/CUDA translation tests, camera-derived temporal reprojection with
+depth and primitive-ID history rejection, an SVGF-style denoising
+baseline, a Vulkan-ray-tracing-shaped CPU seed fixture, and a first
+native Metal compute backend for Apple Silicon. The
+tile-binned 3DGS reference renderer is kept behind an explicit build
+flag rather than being part of the default path. On the local MoltenVK
+test machine the Wicked harness loads the target scene and reports
+SPIR-V shader format, but mesh shaders and Vulkan ray tracing are not
+exposed; therefore the current ray-tracing work uses
+Vulkan-API-shaped fixtures until a backend with the required extensions
+is available. The first such fixture implements a small triangle-scene
+seed tracer that emits the same color, depth, NDC-depth, and
+primitive-ID buffers expected from a
+\texttt{VK\_KHR\_ray\_tracing\_pipeline} capture, then feeds those
+buffers through temporal reprojection and denoising. This staging keeps
+correctness testable on CPUs while the data layouts and algorithms
+remain tile-friendly for CUDA.
 
 % =====================================================================
 \section{Background}\label{sec:bg}
@@ -488,8 +521,13 @@ not used.}
 \begin{enumerate}
     \item \textbf{Vulkan front-end.} A Vulkan loadable ICD that
     implements a \emph{conformance-targeted subset} of Vulkan~1.3 plus
-    selected ray-tracing and external-memory extensions. Applications
-    link the standard Vulkan loader and need no modification.
+    selected ray-tracing and external-memory extensions. Mesh shaders
+    are treated as the preferred programmable primitive-expansion path
+    for Gaussian splats. Tessellation and geometry shaders are not in
+    the v1 target: their useful role in this system, expanding compact
+    primitives into screen-space work, is subsumed by mesh shaders and
+    then by the tile-based software backend. Applications link the
+    standard Vulkan loader and need no modification.
 
     \item \textbf{Intermediate representation (IR).} SPIR-V shaders and
     Vulkan command buffers are lowered into a backend-agnostic compute
@@ -509,10 +547,13 @@ not used.}
 \subsection{Vulkan front-end}
 
 We target a deliberate \emph{subset}: graphics pipelines, compute
-pipelines, command buffers, descriptor sets, swapchain (optional, for
-debug viewer), timeline semaphores, external memory. We initially omit
-multi-draw-indirect at high feature parity, mesh shaders, sparse
-binding, and presentation-engine optimization. SDG does not need them.
+pipelines, command buffers, descriptor sets, mesh shaders, indirect
+dispatch/draw for GPU-driven splat counts, swapchain (optional, for
+debug viewer), timeline semaphores, and external memory. We initially
+omit tessellation shaders, geometry shaders, sparse binding, and
+presentation-engine optimization. SDG does not need them, and for
+Gaussian splatting the tessellation/geometry stages are a worse fit
+than mesh shaders followed by tile-local software shading.
 
 \subsection{Lowering rasterization}
 
@@ -520,7 +561,13 @@ We lower the classical raster pipeline to a tile-based software
 rasterizer in the spirit of Laine and
 Karras~\cite{laine2011software}, with each output tile assigned to a
 threadblock\slash workgroup that performs binning, depth test, and
-fragment shading.
+fragment shading. The same organization is used for the 3DGS fast path:
+Gaussians are projected once, compacted into screen-space tile lists,
+and then blended by tile-local workers. This is the crucial portability
+choice. A tile maps naturally to a CUDA cooperative thread array, a SYCL
+workgroup, or a TPU/Trainium-style block of dense compute; it also keeps
+memory traffic local enough that the backend can be retargeted without
+recreating a fixed-function raster pipeline in disguise.
 
 \subsection{Lowering ray tracing and shadow mapping}
 
@@ -532,17 +579,39 @@ become depth-only raster passes followed by a comparison kernel; for
 high-quality shadows we expect ray-traced shadows to be cheaper than
 classical shadow-map filtering at SDG quality targets.
 
-\subsection{The 3DGS fast path}\label{sec:v1}
+The seed path is intentionally low-resolution and low-sample. Each
+frame exports color, depth, primitive identity, and camera state into
+the temporal reconstruction contract. Adjacent frames then provide the
+screen-space motion map needed for history lookup; depth and primitive
+identity reject disocclusions and visibility changes; a small
+SVGF-style filter removes Monte Carlo noise before any optional learned
+reconstruction stage is considered.
 
-We expose a non-standard Vulkan extension
+\subsection{Paused optional 3DGS fast path}\label{sec:v1}
+
+The project previously exposed a non-standard Vulkan extension
 (\texttt{VK\_VKSPLAT\_gaussian\_splatting}) that lets applications submit
 Gaussian primitives directly. Internally, this dispatches to a
 3DGS rasterizer akin to \cite{kerbl20233dgs}'s but extended for offline
 SDG (deterministic ordering, deeper sample budgets per pixel, optional
-denoising). The rationale is that 3DGS does not need any of the
-classical pipeline machinery, and a system that ships a working 3DGS
-backend on day one is immediately useful for capturing real environments
-and rendering them as training scenes.
+denoising). The Vulkan-facing primitive expansion uses mesh shaders:
+one workgroup processes a batch of Gaussians, computes view-dependent
+color and projected covariance once per splat, and emits the small
+screen-space proxy needed by the fragment/tile stage. The production
+software backend then keeps the same logical structure but executes it
+as explicit tile-binned compute: preprocess, cull, assign splats to
+tiles, sort or approximately order within each tile, and blend pixels.
+
+This is why vkSplat drops tessellation and geometry shaders from the
+initial design. Tessellation expands surfaces; geometry shaders expand
+or amplify primitives late in the traditional graphics pipeline. For
+Gaussian splats, both jobs are better represented by mesh shaders at the
+API boundary and by tile-local software work in the backend. A system
+that ships this path on day one is immediately useful for captured real
+environments and for Lyra-style generated Gaussian scenes. For the
+current milestone sequence, however, this path is paused behind a build
+flag so the default implementation can focus on Vulkan ray-tracing seed
+frames and CUDA lowering.
 
 % =====================================================================
 \section{Backends}\label{sec:backends}
@@ -556,6 +625,14 @@ interop with Vulkan~\cite{nvidia2020vkcuda}.
 \textbf{Triton\slash SYCL.} A second backend in Triton or SYCL would
 demonstrate portability and allow deployment on AMD MI300, Intel Ponte
 Vecchio, and any future accelerator with an LLVM-class compiler.
+
+\textbf{Metal.} Apple Silicon provides a useful local portability
+target. A native Metal backend is not the deployment target, but it
+tests whether the reconstruction contracts are genuinely compute
+portable rather than CUDA-shaped by accident. We use it first for
+temporal reconstruction and denoising on the M-series GPU, then compare
+results against the CPU reference before porting the same contracts to
+CUDA.
 
 \textbf{AI-accelerator-native.} TPU (XLA HLO), Trainium (NeuronCore SDK),
 Cerebras, and Groq each have native compilation paths. Lowering rendering

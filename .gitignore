@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 out/
 cmake-build-*/
 *.o
@@ -58,6 +59,13 @@ paper/main.pdf
 assets/*.ply
 assets/*.splat
 assets/*.bin
+docs/images/*.ppm
+
+# Local research checkouts
+third_party/TokenGS/
+third_party/WickedEngine/
+third_party/colmap/
+log.txt
 
 # OS
 .DS_Store

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Renderer: the abstract backend interface. The v1 implementation is a
-// CUDA-resident 3DGS rasterizer (see include/vksplat/cuda/rasterizer.h).
-// Future backends (Triton/SYCL, XLA HLO for TPU, NeuronCore for
-// Trainium) implement the same interface so the Vulkan front-end and
-// the interop layer can drive any of them through one seam.
+// Renderer: the abstract backend interface. The legacy C++/CUDA 3DGS
+// rasterizers are behind VKSPLAT_ENABLE_3DGS while the default path moves
+// toward Vulkan ray-tracing seed frames, temporal reconstruction, denoising,
+// and CUDA lowering.
 #pragma once
 
 #include "camera.h"
@@ -23,7 +22,7 @@ namespace vksplat {
 struct RenderParams {
     std::uint64_t seed = 0;
     bool deterministic = true;
-    int  spp = 1;             // samples per pixel; 1 for v1 3DGS forward
+    int  spp = 1;             // samples per pixel for low-sample seed paths
     bool clear_to_background = true;
     float3 background = { 0.0f, 0.0f, 0.0f };
 };
@@ -47,7 +46,7 @@ class Renderer {
 public:
     virtual ~Renderer() = default;
 
-    // Identify the backend at runtime (e.g. "cuda", "triton", "xla-hlo").
+    // Identify the backend at runtime (e.g. "cpp", "cuda", "triton").
     [[nodiscard]] virtual std::string_view backend_name() const = 0;
 
     // Upload a scene; backends may keep a pinned device copy.
@@ -64,7 +63,8 @@ public:
 };
 
 // Backend factory. Returns nullptr if the requested backend is not
-// compiled in. v1 supports "cuda" only.
+// compiled in. The "cpp"/"cpu"/"reference" 3DGS backend is available only
+// when VKSPLAT_ENABLE_3DGS is set.
 std::unique_ptr<Renderer> make_renderer(std::string_view backend_name);
 
 } // namespace vksplat

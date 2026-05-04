@@ -12,6 +12,7 @@
 // LUID required by cudaImportExternalMemory.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>

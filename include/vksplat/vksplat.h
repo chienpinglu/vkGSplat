@@ -12,10 +12,34 @@
 #include "scene.h"
 #include "camera.h"
 #include "renderer.h"
-#include "vulkan/instance.h"
-#include "vulkan/device.h"
-#include "vulkan/swapchain.h"
-#include "cuda/rasterizer.h"
-#include "interop/external_memory.h"
-#include "interop/timeline_semaphore.h"
-#include "extensions/vk_vksplat_gaussian_splatting.h"
+#include "denoise.h"
+#include "raytrace_seed.h"
+#include "reprojection.h"
+#include "tile_raster.h"
+#include "spirv/module.h"
+#include "spirv/translator.h"
+
+#if defined(VKSPLAT_ENABLE_3DGS)
+#  include "cpu_reference_renderer.h"
+#  include "gpu_pipeline.h"
+#endif
+
+#if defined(VKSPLAT_ENABLE_VULKAN)
+#  include "vulkan/instance.h"
+#  include "vulkan/device.h"
+#  include "vulkan/swapchain.h"
+#  if defined(VKSPLAT_ENABLE_3DGS)
+#    include "vulkan/mesh_shader_3dgs.h"
+#    include "extensions/vk_vksplat_gaussian_splatting.h"
+#  endif
+#endif
+
+#if defined(VKSPLAT_ENABLE_CUDA) && defined(VKSPLAT_ENABLE_3DGS)
+#  include "cuda/rasterizer.h"
+#  include "interop/external_memory.h"
+#  include "interop/timeline_semaphore.h"
+#endif
+
+#if defined(VKSPLAT_ENABLE_METAL)
+#  include "metal/denoise.h"
+#endif
