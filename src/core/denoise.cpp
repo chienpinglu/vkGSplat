@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/denoise.h"
+#include "vkgsplat/denoise.h"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace vksplat {
+namespace vkgsplat {
 namespace {
 
 std::size_t pixel_count(std::uint32_t width, std::uint32_t height) {
@@ -156,4 +156,4 @@ SvgfDenoiseResult denoise_svgf_baseline(
     return result;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

@@ -3,7 +3,7 @@
 // Verifies binary little-endian 3DGS PLY decoding for the Kerbl/Lyra
 // property layout.
 
-#include <vksplat/scene.h>
+#include <vkgsplat/scene.h>
 
 #include <cmath>
 #include <cstdio>
@@ -21,7 +21,7 @@ bool near(float a, float b, float eps = 1e-6f) {
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     const auto path = std::filesystem::current_path() / "test_scene_ply_fixture.ply";
     const std::vector<std::string> properties = {

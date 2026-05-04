@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/spirv/module.h"
+#include "vkgsplat/spirv/module.h"
 
 #include <cstddef>
 #include <stdexcept>
 
-namespace vksplat::spirv {
+namespace vkgsplat::spirv {
 namespace {
 
 std::string decode_literal_string(const std::vector<std::uint32_t>& operands,
@@ -313,4 +313,4 @@ std::string storage_class_name(StorageClass storage_class) {
     }
 }
 
-} // namespace vksplat::spirv
+} // namespace vkgsplat::spirv

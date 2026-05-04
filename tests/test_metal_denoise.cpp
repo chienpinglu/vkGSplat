@@ -3,8 +3,8 @@
 // Native Apple GPU smoke test: run the SVGF-style denoise contract through
 // Metal and compare against the CPU reference implementation.
 
-#include <vksplat/denoise.h>
-#include <vksplat/metal/denoise.h>
+#include <vkgsplat/denoise.h>
+#include <vkgsplat/metal/denoise.h>
 
 #include <cmath>
 #include <cstdio>
@@ -15,14 +15,14 @@ bool near(float a, float b, float eps = 2.0e-5f) {
     return std::abs(a - b) <= eps;
 }
 
-vksplat::float4 color(float r, float g, float b) {
+vkgsplat::float4 color(float r, float g, float b) {
     return { r, g, b, 1.0f };
 }
 
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     if (!metal::is_available()) {
         std::fprintf(stderr, "Metal device unavailable; skipping\n");

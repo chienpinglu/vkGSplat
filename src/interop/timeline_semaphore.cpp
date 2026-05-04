@@ -4,9 +4,9 @@
 // Vulkan, exported via the OS handle path, then imported into CUDA.
 // One semaphore, two API surfaces, monotonically advancing counter.
 
-#include "vksplat/interop/timeline_semaphore.h"
+#include "vkgsplat/interop/timeline_semaphore.h"
 
-#include "vksplat/vulkan/device.h"
+#include "vkgsplat/vulkan/device.h"
 
 #include <cuda_runtime.h>
 
@@ -18,11 +18,11 @@
 #include <stdexcept>
 #include <utility>
 
-namespace vksplat::interop {
+namespace vkgsplat::interop {
 
 namespace {
 
-#define VKSPLAT_CUDA_CHECK(expr)                                       \
+#define VKGSPLAT_CUDA_CHECK(expr)                                       \
     do {                                                               \
         cudaError_t err__ = (expr);                                    \
         if (err__ != cudaSuccess) {                                    \
@@ -40,7 +40,7 @@ void vk_check(VkResult r, const char* where) {
 
 } // namespace
 
-TimelineSemaphore TimelineSemaphore::create(const vksplat::vk::Device& device,
+TimelineSemaphore TimelineSemaphore::create(const vkgsplat::vk::Device& device,
                                             std::uint64_t              initial_value)
 {
     TimelineSemaphore out;
@@ -99,7 +99,7 @@ TimelineSemaphore TimelineSemaphore::create(const vksplat::vk::Device& device,
 #endif
 
     cudaExternalSemaphore_t cu_sem = nullptr;
-    VKSPLAT_CUDA_CHECK(cudaImportExternalSemaphore(&cu_sem, &cu_desc));
+    VKGSPLAT_CUDA_CHECK(cudaImportExternalSemaphore(&cu_sem, &cu_desc));
     out.cu_semaphore_ = cu_sem;
 
     return out;
@@ -147,4 +147,4 @@ TimelineSemaphore& TimelineSemaphore::operator=(TimelineSemaphore&& o) noexcept 
     return *this;
 }
 
-} // namespace vksplat::interop
+} // namespace vkgsplat::interop

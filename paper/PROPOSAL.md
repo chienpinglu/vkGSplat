@@ -1,4 +1,4 @@
-# vkSplat — research proposal (one-page)
+# vkGSplat — research proposal (one-page)
 
 ## Thesis
 
@@ -25,7 +25,7 @@ the rest interpolated on tensor cores (DLSS 3). Ray-traced lighting
 followed the same path: 1 sample-per-pixel path tracing, denoised by
 SVGF/NRD, importance-resampled by ReSTIR. **The fixed-function units no
 longer produce the final image — they produce a sparse, noisy seed
-that AI reconstructs on tensor cores.** vkSplat is the architectural
+that AI reconstructs on tensor cores.** vkGSplat is the architectural
 endpoint of that trajectory: replace the seed generator with a
 software renderer on the same tensor-rich silicon, and graphics
 hardware drops out of the loop.
@@ -65,7 +65,7 @@ required — and it lets the system be useful immediately for the natural
 SDG flow: capture real environments with a phone, splat them, render
 training data inside them with controlled randomization.
 
-A non-standard `VK_VKSPLAT_gaussian_splatting` extension lets apps
+A non-standard `VK_VKGSPLAT_gaussian_splatting` extension lets apps
 submit Gaussians directly. Classical raster and RT lowering follow as
 v2 / v3.
 
@@ -83,7 +83,7 @@ v2 / v3.
 - **Cost & energy** — $ / image and J / image vs Isaac Sim and
   BlenderProc.
 - **Downstream task** — train an object-detection or manipulation
-  policy on vkSplat data vs Isaac Sim data, controlling for total
+  policy on vkGSplat data vs Isaac Sim data, controlling for total
   training compute. Hypothesis: per-dollar parity or better.
 
 ## Risks (honest)
@@ -97,7 +97,7 @@ v2 / v3.
 
 ## What I want next
 
-1. Refereed feedback on the position paper (`paper/vkSplat.tex`).
+1. Refereed feedback on the position paper (`paper/vkGSplat.tex`).
 2. A small prototype of the 3DGS + minimal-Vulkan front-end on H100,
    targeting one Mip-NeRF 360 scene end-to-end.
 3. Collaborators who care about the SDG-on-AI-compute thesis.

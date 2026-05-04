@@ -1,8 +1,8 @@
-# vkSplat
+# vkGSplat
 
 **A compute-first Vulkan path for synthetic data generation on AI accelerators.**
 
-vkSplat is a software implementation of Vulkan whose backend is a renderer
+vkGSplat is a software implementation of Vulkan whose backend is a renderer
 expressed as a tile-based software path. The production target is CUDA; the
 current portable host C++ backend is the correctness/reference path we use to
 stabilize the contract before moving kernels onto CUDA. SYCL / Triton / TPU /
@@ -12,16 +12,16 @@ or RT cores. The target workload is **synthetic data generation for
 robotics** — throughput-bound, latency-tolerant, consumed by a learned model
 rather than a human eye.
 
-The position the project defends is laid out in `paper/vkSplat.tex` and
+The position the project defends is laid out in `paper/vkGSplat.tex` and
 summarized in `paper/PROPOSAL.md`. **Read those first.** The short version:
 DLSS-style rendering has already moved most of the real-time pipeline off
-fixed-function graphics units onto tensor cores. vkSplat is the architectural
+fixed-function graphics units onto tensor cores. vkGSplat is the architectural
 endpoint of that trajectory — a renderer where seed *and* reconstruction both
 live on tensor-rich compute.
 
 The current implementation plan is tracked in `docs/plan.md`. The important
 near-term decision is that 3DGS is paused as the default path. We keep the
-3DGS renderer in-tree behind `-DVKSPLAT_ENABLE_3DGS=ON`, but the default build
+3DGS renderer in-tree behind `-DVKGSPLAT_ENABLE_3DGS=ON`, but the default build
 now focuses on Vulkan/SPIR-V capture contracts, ray-tracing seed frames,
 temporal reprojection, denoising, native Metal validation on Apple GPUs, and
 CUDA lowering. A neural DLSS-like reconstruction model remains an optional
@@ -41,9 +41,9 @@ longer part of the default milestone gate.
 ## Repository layout
 
 ```
-vkSplat/
+vkGSplat/
 ├── paper/                  Position paper (LaTeX) and one-page proposal — START HERE
-├── include/vksplat/        Public headers
+├── include/vkgsplat/        Public headers
 ├── src/
 │   ├── core/               Scene, camera, IO, math
 │   ├── cuda/               Experimental compute kernels
@@ -62,7 +62,7 @@ A `tinyrender/` scratch sandbox lives next to this repo for prototype spikes.
 
 ## Roadmap
 
-1. **Paper.** Land the position argument (`paper/vkSplat.tex`) and circulate.
+1. **Paper.** Land the position argument (`paper/vkGSplat.tex`) and circulate.
 2. **Vulkan capture contract.** Capture SPIR-V, frame resources, camera state,
    depth, primitive identity, and adjacent-frame metadata from real Vulkan
    programs.
@@ -95,17 +95,17 @@ A `tinyrender/` scratch sandbox lives next to this repo for prototype spikes.
 ## Quick start
 
 ```bash
-cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release -DVKSPLAT_ENABLE_VULKAN=OFF
+cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release -DVKGSPLAT_ENABLE_VULKAN=OFF
 cmake --build build-cpu
 ctest --test-dir build-cpu --output-on-failure
 ```
 
-On Apple Silicon, `VKSPLAT_ENABLE_METAL` defaults to `ON`. The Metal tests need
+On Apple Silicon, `VKGSPLAT_ENABLE_METAL` defaults to `ON`. The Metal tests need
 access to the native GPU; in sandboxed runners they may skip even though they
 pass from a normal terminal.
 
 The paused 3DGS path can be rebuilt explicitly with
-`-DVKSPLAT_ENABLE_3DGS=ON`; that also enables the 3DGS viewer and
+`-DVKGSPLAT_ENABLE_3DGS=ON`; that also enables the 3DGS viewer and
 3DGS-specific tests.
 
 ## Non-goals
@@ -121,10 +121,10 @@ TBD.
 ## Citation
 
 ```
-@misc{lu2026vksplat,
-  title  = {vkSplat: A Compute-First Vulkan Path for Robotics Synthetic Data Generation on AI Accelerators},
+@misc{lu2026vkgsplat,
+  title  = {vkGSplat: A Compute-First Vulkan Path for Robotics Synthetic Data Generation on AI Accelerators},
   author = {Lu, Chien-Ping},
   year   = {2026},
-  note   = {Working draft, \url{https://github.com/chienpinglu/vkSplat}}
+  note   = {Working draft, \url{https://github.com/chienpinglu/vkGSplat}}
 }
 ```

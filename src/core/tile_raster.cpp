@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/tile_raster.h"
+#include "vkgsplat/tile_raster.h"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace vksplat {
+namespace vkgsplat {
 
 TileGrid make_tile_grid(const ImageDesc& desc, std::uint32_t tile_size) {
     if (desc.width == 0 || desc.height == 0) {
@@ -68,4 +68,4 @@ std::vector<TileBin> build_tile_bins(const TileGrid& grid,
     return bins;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

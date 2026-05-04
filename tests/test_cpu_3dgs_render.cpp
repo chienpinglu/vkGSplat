@@ -3,7 +3,7 @@
 // End-to-end CPU reference 3DGS test: synthetic Gaussians are projected,
 // tiled, depth-sorted, and blended into a tiny image.
 
-#include <vksplat/cpu_reference_renderer.h>
+#include <vkgsplat/cpu_reference_renderer.h>
 
 #include <cmath>
 #include <cstdio>
@@ -14,12 +14,12 @@ bool near(float a, float b, float eps = 1e-4f) {
     return std::abs(a - b) <= eps;
 }
 
-vksplat::Gaussian make_gaussian(vksplat::float3 position,
+vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
                                 float scale,
-                                vksplat::float3 color,
+                                vkgsplat::float3 color,
                                 float opacity_logit) {
     constexpr float sh_c0 = 0.28209479177387814f;
-    vksplat::Gaussian g{};
+    vkgsplat::Gaussian g{};
     g.position = position;
     g.scale_log = { std::log(scale), std::log(scale), std::log(scale) };
     g.rotation = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -35,7 +35,7 @@ vksplat::Gaussian make_gaussian(vksplat::float3 position,
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     Scene scene;
     scene.resize(2);

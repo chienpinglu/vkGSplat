@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/cuda/tile_renderer.h"
+#include "vkgsplat/cuda/tile_renderer.h"
 
 #include <cuda_runtime.h>
 
-namespace vksplat::cuda {
+namespace vkgsplat::cuda {
 namespace {
 
 __device__ float splat_alpha(const GpuProjectedSplat& s, float px, float py) {
@@ -64,4 +64,4 @@ void launch_tile_renderer(const TileRendererLaunch& launch,
         launch, projected, sorted_projected_indices, tile_ranges, output_rgba);
 }
 
-} // namespace vksplat::cuda
+} // namespace vkgsplat::cuda

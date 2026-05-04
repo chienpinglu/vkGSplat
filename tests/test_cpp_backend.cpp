@@ -2,7 +2,7 @@
 //
 // Renderer factory and host-buffer coverage for the optional C++ 3DGS backend.
 
-#include <vksplat/vksplat.h>
+#include <vkgsplat/vkgsplat.h>
 
 #include <cmath>
 #include <cstdio>
@@ -11,12 +11,12 @@
 
 namespace {
 
-vksplat::Gaussian make_gaussian(vksplat::float3 position,
+vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
                                 float scale,
-                                vksplat::float3 color,
+                                vkgsplat::float3 color,
                                 float opacity_logit) {
     constexpr float sh_c0 = 0.28209479177387814f;
-    vksplat::Gaussian g{};
+    vkgsplat::Gaussian g{};
     g.position = position;
     g.scale_log = { std::log(scale), std::log(scale), std::log(scale) };
     g.rotation = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -32,7 +32,7 @@ vksplat::Gaussian make_gaussian(vksplat::float3 position,
 } // namespace
 
 int main() {
-    auto renderer = vksplat::make_renderer("cpp");
+    auto renderer = vkgsplat::make_renderer("cpp");
     if (!renderer) {
         std::fprintf(stderr, "cpp backend factory returned null\n");
         return 1;
@@ -44,24 +44,24 @@ int main() {
         return 1;
     }
 
-    vksplat::Scene scene;
+    vkgsplat::Scene scene;
     scene.resize(1);
     scene.gaussians()[0] = make_gaussian(
         { 0.0f, 0.0f, 0.0f }, 0.08f, { 1.0f, 0.1f, 0.0f }, 8.0f);
     renderer->upload(scene);
 
-    vksplat::Camera camera;
+    vkgsplat::Camera camera;
     camera.set_resolution(16, 16);
     camera.set_perspective(1.57079632679f, 1.0f, 0.1f, 10.0f);
     camera.look_at({ 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
 
     std::vector<std::uint8_t> rgba(16 * 16 * 4);
-    vksplat::RenderTarget target;
-    target.kind = vksplat::RenderTargetKind::HOST_BUFFER;
-    target.desc = { 16, 16, vksplat::PixelFormat::R8G8B8A8_UNORM, 1, 1 };
+    vkgsplat::RenderTarget target;
+    target.kind = vkgsplat::RenderTargetKind::HOST_BUFFER;
+    target.desc = { 16, 16, vkgsplat::PixelFormat::R8G8B8A8_UNORM, 1, 1 };
     target.user_handle = rgba.data();
 
-    vksplat::RenderParams params;
+    vkgsplat::RenderParams params;
     params.background = { 0.0f, 0.0f, 0.0f };
     const auto frame = renderer->render(camera, params, target);
     renderer->wait(frame);

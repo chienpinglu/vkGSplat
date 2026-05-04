@@ -4,14 +4,14 @@
 // for the CUDA-friendly renderer shape: fixed tiles, half-open bounds,
 // deterministic per-tile splat order.
 
-#include <vksplat/tile_raster.h>
+#include <vkgsplat/tile_raster.h>
 
 #include <cstdio>
 #include <vector>
 
 namespace {
 
-bool expect_indices(const vksplat::TileBin& bin, std::initializer_list<std::uint32_t> want) {
+bool expect_indices(const vkgsplat::TileBin& bin, std::initializer_list<std::uint32_t> want) {
     const std::vector<std::uint32_t> expected(want);
     if (bin.splat_indices == expected) return true;
 
@@ -26,7 +26,7 @@ bool expect_indices(const vksplat::TileBin& bin, std::initializer_list<std::uint
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     const TileGrid grid = make_tile_grid({ 32, 32, PixelFormat::R8G8B8A8_UNORM, 1, 1 }, 16);
     if (grid.tiles_x != 2 || grid.tiles_y != 2) {

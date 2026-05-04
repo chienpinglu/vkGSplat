@@ -3,7 +3,7 @@
 // M6 fixture: generate a low-sample Vulkan-ray-tracing-shaped seed frame,
 // then feed it through M4 reprojection and M5 denoising.
 
-#include <vksplat/raytrace_seed.h>
+#include <vkgsplat/raytrace_seed.h>
 
 #include <cmath>
 #include <cstdio>
@@ -14,14 +14,14 @@ bool near(float a, float b, float eps = 1.0e-4f) {
     return std::abs(a - b) <= eps;
 }
 
-float luminance(vksplat::float4 c) {
+float luminance(vkgsplat::float4 c) {
     return c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f;
 }
 
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     RayTracingScene scene;
     scene.materials.push_back({ { 0.9f, 0.25f, 0.12f, 1.0f } });

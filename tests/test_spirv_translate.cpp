@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Tests the first vkSplat shader-translation milestones: parse a minimal
+// Tests the first vkGSplat shader-translation milestones: parse a minimal
 // SPIR-V module, inventory its IDs, and lower a tiny compute memory subset.
 
-#include <vksplat/spirv/module.h>
-#include <vksplat/spirv/translator.h>
+#include <vkgsplat/spirv/module.h>
+#include <vkgsplat/spirv/translator.h>
 
 #include <cstdio>
 #include <initializer_list>
@@ -31,7 +31,7 @@ std::uint32_t str_word(const char* chars) {
 
 std::vector<std::uint32_t> minimal_compute_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         8u,
@@ -54,7 +54,7 @@ std::vector<std::uint32_t> minimal_compute_spirv() {
 
 std::vector<std::uint32_t> store_constant_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         9u,
@@ -82,7 +82,7 @@ std::vector<std::uint32_t> store_constant_spirv() {
 
 std::vector<std::uint32_t> storage_buffer_access_chain_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         19u,
@@ -127,7 +127,7 @@ std::vector<std::uint32_t> storage_buffer_access_chain_spirv() {
 
 std::vector<std::uint32_t> global_invocation_id_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         18u,
@@ -161,7 +161,7 @@ std::vector<std::uint32_t> global_invocation_id_spirv() {
 
 std::vector<std::uint32_t> push_constant_interface_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         12u,
@@ -189,7 +189,7 @@ std::vector<std::uint32_t> push_constant_interface_spirv() {
 
 std::vector<std::uint32_t> ray_query_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         40u,
@@ -243,7 +243,7 @@ std::vector<std::uint32_t> ray_query_spirv() {
 
 std::vector<std::uint32_t> ray_generation_trace_ray_spirv() {
     std::vector<std::uint32_t> words = {
-        vksplat::spirv::kMagic,
+        vkgsplat::spirv::kMagic,
         0x00010500u,
         0u,
         40u,
@@ -297,7 +297,7 @@ bool contains(const std::string& haystack, const char* needle) {
 } // namespace
 
 int main() {
-    using namespace vksplat::spirv;
+    using namespace vkgsplat::spirv;
 
     const auto words = minimal_compute_spirv();
     const Module module = parse_module(words);
@@ -451,15 +451,15 @@ int main() {
         return 1;
     }
     if (!contains(ray_c, "void main(const void* tlas, uint32_t* hit)") ||
-        !contains(ray_c, "vksplat_ray_query rq = { 0u, 0u };") ||
-        !contains(ray_c, "vksplat_ray_query_initialize(&rq, tlas, 0u, 255u") ||
-        !contains(ray_c, "hit[0] = vksplat_ray_query_intersection_type(&rq, 1u);")) {
+        !contains(ray_c, "vkgsplat_ray_query rq = { 0u, 0u };") ||
+        !contains(ray_c, "vkgsplat_ray_query_initialize(&rq, tlas, 0u, 255u") ||
+        !contains(ray_c, "hit[0] = vkgsplat_ray_query_intersection_type(&rq, 1u);")) {
         std::fprintf(stderr, "C translation did not lower ray query operations:\n%s\n", ray_c.c_str());
         return 1;
     }
     if (!contains(ray_cuda, "main_kernel(const void* tlas, uint32_t* hit)") ||
-        !contains(ray_cuda, "vksplat_ray_query_initialize(&rq, tlas, 0u, 255u") ||
-        !contains(ray_cuda, "hit[0] = vksplat_ray_query_intersection_type(&rq, 1u);")) {
+        !contains(ray_cuda, "vkgsplat_ray_query_initialize(&rq, tlas, 0u, 255u") ||
+        !contains(ray_cuda, "hit[0] = vkgsplat_ray_query_intersection_type(&rq, 1u);")) {
         std::fprintf(stderr, "CUDA translation did not lower ray query operations:\n%s\n",
                      ray_cuda.c_str());
         return 1;
@@ -480,14 +480,14 @@ int main() {
     const std::string trace_cuda = translate_to_cuda(trace_module);
     if (!contains(trace_c, "execution_model: ray_generation") ||
         !contains(trace_c, "uint32_t payl = 0;") ||
-        !contains(trace_c, "vksplat_trace_ray(tlas, 0u, 255u, 0u, 1u, 0u") ||
+        !contains(trace_c, "vkgsplat_trace_ray(tlas, 0u, 255u, 0u, 1u, 0u") ||
         !contains(trace_c, "&payl);") ||
         !contains(trace_c, "out[0] = payl;")) {
         std::fprintf(stderr, "C translation did not lower OpTraceRayKHR:\n%s\n", trace_c.c_str());
         return 1;
     }
     if (!contains(trace_cuda, "execution_model: ray_generation") ||
-        !contains(trace_cuda, "vksplat_trace_ray(tlas, 0u, 255u, 0u, 1u, 0u") ||
+        !contains(trace_cuda, "vkgsplat_trace_ray(tlas, 0u, 255u, 0u, 1u, 0u") ||
         !contains(trace_cuda, "out[0] = payl;")) {
         std::fprintf(stderr, "CUDA translation did not lower OpTraceRayKHR:\n%s\n",
                      trace_cuda.c_str());

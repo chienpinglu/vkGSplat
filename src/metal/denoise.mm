@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/metal/denoise.h"
+#include "vkgsplat/metal/denoise.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -10,7 +10,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace vksplat::metal {
+namespace vkgsplat::metal {
 namespace {
 
 constexpr const char* kDenoiseShader = R"(
@@ -346,4 +346,4 @@ SvgfDenoiseResult denoise_svgf_baseline(
     }
 }
 
-} // namespace vksplat::metal
+} // namespace vkgsplat::metal

@@ -5,11 +5,11 @@
 // code refers to this as "world_view_transform"); the projection is
 // reversed-Z friendly and y-down, matching Vulkan's clip space.
 
-#include "vksplat/camera.h"
+#include "vkgsplat/camera.h"
 
 #include <cmath>
 
-namespace vksplat {
+namespace vkgsplat {
 
 namespace {
 
@@ -70,4 +70,4 @@ void Camera::set_perspective(float fov_y, float aspect, float z_near, float z_fa
     projection_ = m;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

@@ -10,9 +10,9 @@
 // extensions are not required and the picker falls back to whatever
 // discrete (or, failing that, integrated) device is present.
 
-#include "vksplat/vulkan/device.h"
+#include "vkgsplat/vulkan/device.h"
 
-#include "vksplat/vulkan/instance.h"
+#include "vkgsplat/vulkan/instance.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -22,7 +22,7 @@
 #include <utility>
 #include <vector>
 
-namespace vksplat::vk {
+namespace vkgsplat::vk {
 
 namespace {
 
@@ -188,7 +188,7 @@ Device Device::create(const Instance&         instance,
     vkGetPhysicalDeviceProperties2(picked, &props2);
     std::memcpy(out.device_uuid_.data(), id_props.deviceUUID, VK_UUID_SIZE);
 
-    std::fprintf(stderr, "[vksplat] using device: %s\n", props2.properties.deviceName);
+    std::fprintf(stderr, "[vkgsplat] using device: %s\n", props2.properties.deviceName);
     return out;
 }
 
@@ -224,4 +224,4 @@ Device& Device::operator=(Device&& o) noexcept {
     return *this;
 }
 
-} // namespace vksplat::vk
+} // namespace vkgsplat::vk

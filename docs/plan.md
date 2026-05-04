@@ -1,15 +1,15 @@
-# vkSplat Plan
+# vkGSplat Plan
 
 This is the working implementation plan. The goal is still to render with CUDA. The current strategy is to make the portable C++ backend correct and testable first, then port the stable renderer, temporal reconstruction, and denoising contracts to CUDA.
 
 ## Current Position
 
-vkSplat does not need a DLSS clone as a core dependency, and 3DGS is paused as
+vkGSplat does not need a DLSS clone as a core dependency, and 3DGS is paused as
 the default renderer for now.
 
 The default path should prove that Vulkan/SPIR-V programs can feed low-sample
 ray-tracing seed frames, temporal reprojection, denoising, and eventually CUDA
-kernels. 3DGS remains in-tree behind `-DVKSPLAT_ENABLE_3DGS=ON`, but it should
+kernels. 3DGS remains in-tree behind `-DVKGSPLAT_ENABLE_3DGS=ON`, but it should
 not block the main stack. The required near-term reconstruction work is:
 
 - temporal reprojection between adjacent frames,
@@ -24,7 +24,7 @@ not block the main stack. The required near-term reconstruction work is:
 
 ### M1: Portable C++ Reference Contracts
 
-Status: active; 3DGS renderer paused behind `VKSPLAT_ENABLE_3DGS`.
+Status: active; 3DGS renderer paused behind `VKGSPLAT_ENABLE_3DGS`.
 
 - Keep CPU reference contracts for camera, scene metadata, tile work partitioning, SPIR-V analysis, ray-tracing seed frames, reprojection, and denoising.
 - Keep CUDA out of the critical path until the backend contract is stable, but keep every data layout and algorithm tile-friendly for CUDA.
@@ -33,7 +33,7 @@ Status: active; 3DGS renderer paused behind `VKSPLAT_ENABLE_3DGS`.
 Paused optional 3DGS work:
 
 - The C++ tiled 3DGS renderer, CUDA 3DGS tile renderer, mesh-shader 3DGS hooks, viewer, and 3DGS asset tests are disabled by default.
-- Re-enable them with `-DVKSPLAT_ENABLE_3DGS=ON` if we need to revisit Gaussian-splat rendering.
+- Re-enable them with `-DVKGSPLAT_ENABLE_3DGS=ON` if we need to revisit Gaussian-splat rendering.
 
 ### M2: Vulkan Program Capture Contract
 
@@ -64,7 +64,7 @@ Status: in progress.
 
 Current implementation:
 
-- `include/vksplat/reprojection.h` defines the CPU reference frame, motion-map, options, and result contract.
+- `include/vkgsplat/reprojection.h` defines the CPU reference frame, motion-map, options, and result contract.
 - `src/core/reprojection.cpp` derives a current-to-previous screen-space motion map from current NDC depth plus current/previous camera matrices, then reprojects previous-frame color with that map.
 - `tests/test_reprojection.cpp` validates camera-derived motion, stable history reuse, edge disocclusion, primitive-ID rejection, and depth rejection.
 
@@ -79,7 +79,7 @@ Status: CPU baseline implemented; multi-frame moments and normal-guided filterin
 
 Current implementation:
 
-- `include/vksplat/denoise.h` defines the CPU reference denoise frame, options, and result contract.
+- `include/vkgsplat/denoise.h` defines the CPU reference denoise frame, options, and result contract.
 - `src/core/denoise.cpp` implements temporal accumulation from the M4 `ReprojectionResult`, luminance variance estimation, and a small edge-aware spatial filter.
 - `tests/test_denoise.cpp` validates history use, noisy-pixel smoothing, variance tracking, and rejection across depth/primitive discontinuities.
 
@@ -94,7 +94,7 @@ Status: first CPU fixture implemented.
 
 Current implementation:
 
-- `include/vksplat/raytrace_seed.h` defines a Vulkan-ray-tracing-shaped seed-frame contract: top-level acceleration structure, ray-generation shader, miss shader, closest-hit shader, color, depth, NDC depth, primitive ID, and camera matrices.
+- `include/vkgsplat/raytrace_seed.h` defines a Vulkan-ray-tracing-shaped seed-frame contract: top-level acceleration structure, ray-generation shader, miss shader, closest-hit shader, color, depth, NDC depth, primitive ID, and camera matrices.
 - `src/core/raytrace_seed.cpp` implements a small deterministic CPU triangle tracer with low-sample radiance noise.
 - `tests/test_raytrace_seed.cpp` generates two noisy 1-spp frames, derives the M4 camera motion map from NDC depth and matrices, reprojects stable hit history, rejects miss pixels, and feeds the result into the M5 denoiser.
 
@@ -102,14 +102,14 @@ Current implementation:
 
 Status: first Metal compute pass implemented.
 
-- Add `VKSPLAT_ENABLE_METAL`, enabled by default on Apple platforms.
+- Add `VKGSPLAT_ENABLE_METAL`, enabled by default on Apple platforms.
 - Treat the M4 GPU as a local native compute backend for portability testing, not as a replacement for CUDA.
 - Port the stable reconstruction contracts to Metal first, starting with denoising, then reprojection and ray-tracing seed kernels.
 - Compare Metal results against the CPU reference with epsilon checks before any backend-specific optimization.
 
 Current implementation:
 
-- `include/vksplat/metal/denoise.h` exposes Metal availability, device-name, and SVGF-style denoise entry points.
+- `include/vkgsplat/metal/denoise.h` exposes Metal availability, device-name, and SVGF-style denoise entry points.
 - `src/metal/denoise.mm` compiles two Metal compute kernels at runtime: temporal accumulation and edge-aware spatial filtering.
 - `tests/test_metal_denoise.cpp` compares Metal output against the CPU denoiser and skips with code `77` if no Metal device is visible.
 
@@ -128,7 +128,7 @@ Status: optional research branch.
 
 - Consider a small DLSS-like model only if classical temporal reconstruction is insufficient.
 - Inputs would be low-resolution color, depth, velocity, jitter, exposure, and history.
-- Training data should come from high-sample/high-resolution references generated by vkSplat or captured from Wicked Engine.
+- Training data should come from high-sample/high-resolution references generated by vkGSplat or captured from Wicked Engine.
 - This is not a blocker for the core Vulkan-to-CUDA stack.
 
 ## Immediate Next Step

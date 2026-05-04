@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// CUDA backend for vkSplat: 3D Gaussian Splatting forward rasterizer.
+// CUDA backend for vkGSplat: 3D Gaussian Splatting forward rasterizer.
 //
 // Pipeline (Kerbl et al. 2023, with SDG-flavoured tweaks):
 //
@@ -17,7 +17,7 @@
 // device code is staged behind clearly marked TODO blocks; v1 will
 // fill them in by porting the reference CUDA implementation.
 
-#include "vksplat/cuda/rasterizer.h"
+#include "vkgsplat/cuda/rasterizer.h"
 
 #include <cuda_runtime.h>
 
@@ -26,11 +26,11 @@
 #include <stdexcept>
 #include <vector>
 
-namespace vksplat::cuda {
+namespace vkgsplat::cuda {
 
 namespace {
 
-#define VKSPLAT_CUDA_CHECK(expr)                                       \
+#define VKGSPLAT_CUDA_CHECK(expr)                                       \
     do {                                                               \
         cudaError_t err__ = (expr);                                    \
         if (err__ != cudaSuccess) {                                    \
@@ -110,7 +110,7 @@ __global__ void blend_kernel(int /*image_w*/, int /*image_h*/,
 class RasterizerImpl {
 public:
     RasterizerImpl() {
-        VKSPLAT_CUDA_CHECK(cudaStreamCreate(&stream_));
+        VKGSPLAT_CUDA_CHECK(cudaStreamCreate(&stream_));
     }
 
     ~RasterizerImpl() {
@@ -121,13 +121,13 @@ public:
 
     void bind_to_uuid(const std::array<unsigned char, 16>& uuid) {
         int count = 0;
-        VKSPLAT_CUDA_CHECK(cudaGetDeviceCount(&count));
+        VKGSPLAT_CUDA_CHECK(cudaGetDeviceCount(&count));
         for (int i = 0; i < count; ++i) {
             cudaDeviceProp p{};
-            VKSPLAT_CUDA_CHECK(cudaGetDeviceProperties(&p, i));
+            VKGSPLAT_CUDA_CHECK(cudaGetDeviceProperties(&p, i));
             if (std::memcmp(p.uuid.bytes, uuid.data(), 16) == 0) {
-                VKSPLAT_CUDA_CHECK(cudaSetDevice(i));
-                std::fprintf(stderr, "[vksplat][cuda] bound to device %d (%s)\n", i, p.name);
+                VKGSPLAT_CUDA_CHECK(cudaSetDevice(i));
+                std::fprintf(stderr, "[vkgsplat][cuda] bound to device %d (%s)\n", i, p.name);
                 return;
             }
         }
@@ -143,15 +143,15 @@ public:
         if (gaussian_count_ == 0) return;
 
         const std::size_t bytes = sizeof(Gaussian) * gaussian_count_;
-        VKSPLAT_CUDA_CHECK(cudaMalloc(&gaussians_dev_, bytes));
-        VKSPLAT_CUDA_CHECK(cudaMemcpyAsync(gaussians_dev_,
+        VKGSPLAT_CUDA_CHECK(cudaMalloc(&gaussians_dev_, bytes));
+        VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(gaussians_dev_,
                                            scene.gaussians().data(),
                                            bytes,
                                            cudaMemcpyHostToDevice,
                                            stream_));
 
         if (preprocessed_dev_) cudaFree(preprocessed_dev_);
-        VKSPLAT_CUDA_CHECK(cudaMalloc(&preprocessed_dev_,
+        VKGSPLAT_CUDA_CHECK(cudaMalloc(&preprocessed_dev_,
                                       sizeof(PreprocessedGaussian) * gaussian_count_));
     }
 
@@ -189,7 +189,7 @@ public:
     }
 
     void wait(FrameId /*frame*/) {
-        VKSPLAT_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        VKGSPLAT_CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
 private:
@@ -226,16 +226,16 @@ void Rasterizer::bind_to_device_uuid(const std::array<unsigned char, 16>& uuid) 
     impl_->bind_to_uuid(uuid);
 }
 
-} // namespace vksplat::cuda
+} // namespace vkgsplat::cuda
 
 // ---------------------------------------------------------------------
 // Backend factory
 // ---------------------------------------------------------------------
 
-namespace vksplat {
+namespace vkgsplat {
 
 std::unique_ptr<Renderer> make_cuda_renderer() {
     return std::make_unique<cuda::Rasterizer>();
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

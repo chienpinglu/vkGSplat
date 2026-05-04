@@ -2,12 +2,12 @@
 //
 // Smoke test for the Scene container — does not require I/O.
 
-#include <vksplat/scene.h>
+#include <vkgsplat/scene.h>
 
 #include <cstdio>
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     Scene s;
     if (!s.empty()) { std::fprintf(stderr, "fresh scene not empty\n"); return 1; }

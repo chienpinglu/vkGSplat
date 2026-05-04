@@ -3,7 +3,7 @@
 // tinyvk driver — implements the Vulkan-shaped tinyvk.h entry points by
 // routing every command into the CUDA renderer in ../cuda/.
 //
-// This is the architectural punchline of the vkSplat thesis in
+// This is the architectural punchline of the vkGSplat thesis in
 // miniature: the *application* speaks a Vulkan-style API; the *driver*
 // underneath is a software renderer expressed entirely in CUDA compute.
 // No fixed-function graphics hardware is touched on the device side;
@@ -61,7 +61,7 @@ struct TvkBuffer_T {
     void*    host_ptr = nullptr;       // simple host-shadow buffer (pedagogical)
 };
 
-struct TvkMeshVKSPLAT_T {
+struct TvkMeshVKGSPLAT_T {
     DeviceModel device_model{};        // the CUDA-uploaded mesh + textures
     bool        valid = false;
 };
@@ -81,8 +81,8 @@ struct CmdBeginRendering {
 };
 struct CmdEndRendering {};
 struct CmdDrawMesh {
-    TvkMeshVKSPLAT mesh;
-    TvkMeshDrawInfoVKSPLAT info;
+    TvkMeshVKGSPLAT mesh;
+    TvkMeshDrawInfoVKGSPLAT info;
 };
 
 using Command = std::variant<CmdBeginRendering, CmdEndRendering, CmdDrawMesh>;
@@ -116,9 +116,9 @@ mat<4,4> mat4_from_columns(const float c[16]) {
     return m;
 }
 
-// Translate a TvkTextureDataVKSPLAT into the HostTexture the CUDA upload
+// Translate a TvkTextureDataVKGSPLAT into the HostTexture the CUDA upload
 // path expects.
-HostTexture to_host_texture(const TvkTextureDataVKSPLAT& src) {
+HostTexture to_host_texture(const TvkTextureDataVKGSPLAT& src) {
     HostTexture ht;
     ht.w   = static_cast<int>(src.width);
     ht.h   = static_cast<int>(src.height);
@@ -290,9 +290,9 @@ void tvkDestroyBuffer(TvkDevice /*device*/, TvkBuffer buffer) {
     delete buffer;
 }
 
-TvkResult tvkCreateMeshVKSPLAT(TvkDevice                       /*device*/,
-                               const TvkMeshCreateInfoVKSPLAT* pCreateInfo,
-                               TvkMeshVKSPLAT*                 pMesh) {
+TvkResult tvkCreateMeshVKGSPLAT(TvkDevice                       /*device*/,
+                               const TvkMeshCreateInfoVKGSPLAT* pCreateInfo,
+                               TvkMeshVKGSPLAT*                 pMesh) {
     if (!pCreateInfo || !pMesh) return TVK_ERROR_INITIALIZATION_FAILED;
 
     HostModel hm;
@@ -313,7 +313,7 @@ TvkResult tvkCreateMeshVKSPLAT(TvkDevice                       /*device*/,
     hm.normalmap = to_host_texture(pCreateInfo->normalMap);
     hm.specular  = to_host_texture(pCreateInfo->specular);
 
-    auto* mesh = new (std::nothrow) TvkMeshVKSPLAT_T;
+    auto* mesh = new (std::nothrow) TvkMeshVKGSPLAT_T;
     if (!mesh) return TVK_ERROR_OUT_OF_HOST_MEMORY;
     mesh->device_model = tinycuda::upload_model_to_device(hm);
     mesh->valid = true;
@@ -321,7 +321,7 @@ TvkResult tvkCreateMeshVKSPLAT(TvkDevice                       /*device*/,
     return TVK_SUCCESS;
 }
 
-void tvkDestroyMeshVKSPLAT(TvkDevice /*device*/, TvkMeshVKSPLAT mesh) {
+void tvkDestroyMeshVKGSPLAT(TvkDevice /*device*/, TvkMeshVKGSPLAT mesh) {
     if (!mesh) return;
     if (mesh->valid) tinycuda::free_device_model(mesh->device_model);
     delete mesh;
@@ -367,9 +367,9 @@ void tvkCmdEndRendering(TvkCommandBuffer cb) {
     cb->commands.emplace_back(CmdEndRendering{});
 }
 
-void tvkCmdDrawMeshVKSPLAT(TvkCommandBuffer              cb,
-                           TvkMeshVKSPLAT                mesh,
-                           const TvkMeshDrawInfoVKSPLAT* pDrawInfo) {
+void tvkCmdDrawMeshVKGSPLAT(TvkCommandBuffer              cb,
+                           TvkMeshVKGSPLAT                mesh,
+                           const TvkMeshDrawInfoVKGSPLAT* pDrawInfo) {
     if (!cb || !cb->recording || !pDrawInfo) return;
     cb->commands.emplace_back(CmdDrawMesh{ mesh, *pDrawInfo });
 }

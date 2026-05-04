@@ -2,7 +2,7 @@
 //
 // Exercises real .splat decoding instead of only the Scene container.
 
-#include <vksplat/scene.h>
+#include <vkgsplat/scene.h>
 
 #include <array>
 #include <cmath>
@@ -27,7 +27,7 @@ bool near(float a, float b, float eps = 1e-5f) {
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     const auto path = std::filesystem::current_path() / "test_scene_io_fixture.splat";
     const SplatRecord records[] = {

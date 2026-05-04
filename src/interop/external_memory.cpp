@@ -12,9 +12,9 @@
 //   https://github.com/NVIDIA/cuda-samples (vulkanImageCUDA)
 // Cited in the position paper as [nvidia2020vkcuda].
 
-#include "vksplat/interop/external_memory.h"
+#include "vkgsplat/interop/external_memory.h"
 
-#include "vksplat/vulkan/device.h"
+#include "vkgsplat/vulkan/device.h"
 
 #include <cuda_runtime.h>
 
@@ -29,11 +29,11 @@
 #include <stdexcept>
 #include <utility>
 
-namespace vksplat::interop {
+namespace vkgsplat::interop {
 
 namespace {
 
-#define VKSPLAT_CUDA_CHECK(expr)                                       \
+#define VKGSPLAT_CUDA_CHECK(expr)                                       \
     do {                                                               \
         cudaError_t err__ = (expr);                                    \
         if (err__ != cudaSuccess) {                                    \
@@ -75,7 +75,7 @@ std::uint32_t find_memory_type(VkPhysicalDevice pd,
 
 } // namespace
 
-ExternalImage ExternalImage::create(const vksplat::vk::Device& device,
+ExternalImage ExternalImage::create(const vkgsplat::vk::Device& device,
                                     const ImageDesc&           desc)
 {
     ExternalImage out;
@@ -171,7 +171,7 @@ ExternalImage ExternalImage::create(const vksplat::vk::Device& device,
 #endif
 
     cudaExternalMemory_t cu_ext = nullptr;
-    VKSPLAT_CUDA_CHECK(cudaImportExternalMemory(&cu_ext, &cu_desc));
+    VKGSPLAT_CUDA_CHECK(cudaImportExternalMemory(&cu_ext, &cu_desc));
     out.cu_ext_memory_ = cu_ext;
 
     // Map the imported memory as a 2D mipmapped array, then wrap level 0
@@ -185,17 +185,17 @@ ExternalImage ExternalImage::create(const vksplat::vk::Device& device,
     map_desc.flags     = cudaArraySurfaceLoadStore;
 
     cudaMipmappedArray_t mip = nullptr;
-    VKSPLAT_CUDA_CHECK(cudaExternalMemoryGetMappedMipmappedArray(&mip, cu_ext, &map_desc));
+    VKGSPLAT_CUDA_CHECK(cudaExternalMemoryGetMappedMipmappedArray(&mip, cu_ext, &map_desc));
 
     cudaArray_t level0 = nullptr;
-    VKSPLAT_CUDA_CHECK(cudaGetMipmappedArrayLevel(&level0, mip, 0));
+    VKGSPLAT_CUDA_CHECK(cudaGetMipmappedArrayLevel(&level0, mip, 0));
 
     cudaResourceDesc rd{};
     rd.resType         = cudaResourceTypeArray;
     rd.res.array.array = level0;
 
     cudaSurfaceObject_t surf = 0;
-    VKSPLAT_CUDA_CHECK(cudaCreateSurfaceObject(&surf, &rd));
+    VKGSPLAT_CUDA_CHECK(cudaCreateSurfaceObject(&surf, &rd));
     out.cu_surface_ = reinterpret_cast<void*>(static_cast<std::uintptr_t>(surf));
 
     return out;
@@ -254,4 +254,4 @@ ExternalImage& ExternalImage::operator=(ExternalImage&& o) noexcept {
     return *this;
 }
 
-} // namespace vksplat::interop
+} // namespace vkgsplat::interop

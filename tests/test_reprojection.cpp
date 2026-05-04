@@ -4,7 +4,7 @@
 // pixel to the right in previous-frame space, then deliberately changes
 // primitive/depth on two pixels to validate history rejection.
 
-#include <vksplat/reprojection.h>
+#include <vkgsplat/reprojection.h>
 
 #include <cmath>
 #include <cstdio>
@@ -15,12 +15,12 @@ bool near(float a, float b, float eps = 1.0e-6f) {
     return std::abs(a - b) <= eps;
 }
 
-vksplat::float4 color(float r, float g, float b) {
+vkgsplat::float4 color(float r, float g, float b) {
     return { r, g, b, 1.0f };
 }
 
-vksplat::mat4 identity() {
-    vksplat::mat4 m{};
+vkgsplat::mat4 identity() {
+    vkgsplat::mat4 m{};
     m.m[0] = 1.0f;
     m.m[5] = 1.0f;
     m.m[10] = 1.0f;
@@ -31,7 +31,7 @@ vksplat::mat4 identity() {
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     constexpr std::uint32_t width = 4;
     constexpr std::uint32_t height = 2;

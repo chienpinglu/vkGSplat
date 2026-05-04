@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/cpu_reference_renderer.h"
+#include "vkgsplat/cpu_reference_renderer.h"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace vksplat {
+namespace vkgsplat {
 namespace {
 
 struct Mat3 {
@@ -387,4 +387,4 @@ CpuReferenceRenderResult render_3dgs_cpu_reference(
     return result;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

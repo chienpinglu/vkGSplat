@@ -4,7 +4,7 @@
 // 3DGS PLY, load it through Scene::load, and render it through the CPU
 // reference pipeline.
 
-#include <vksplat/cpu_reference_renderer.h>
+#include <vkgsplat/cpu_reference_renderer.h>
 
 #include <cmath>
 #include <cstdio>
@@ -40,7 +40,7 @@ void write_row(std::ofstream& out, const AssetGaussian& g) {
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     const auto path = std::filesystem::current_path() / "test_real_asset_path.ply";
     const AssetGaussian gaussians[] = {

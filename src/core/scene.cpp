@@ -11,7 +11,7 @@
 // Both implementations stop short of the full robust parser pending a
 // dedicated dependency choice (tinyply vs nanoply vs hand-rolled).
 
-#include "vksplat/scene.h"
+#include "vkgsplat/scene.h"
 
 #include <algorithm>
 #include <array>
@@ -24,14 +24,14 @@
 #include <stdexcept>
 #include <string>
 
-namespace vksplat {
+namespace vkgsplat {
 
 void Scene::reserve(std::size_t n) { gaussians_.reserve(n); }
 void Scene::resize(std::size_t n)  { gaussians_.resize(n); }
 
 Scene Scene::load(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) {
-        throw std::runtime_error("vksplat::Scene::load: file not found: " + path.string());
+        throw std::runtime_error("vkgsplat::Scene::load: file not found: " + path.string());
     }
 
     const auto ext = path.extension().string();
@@ -41,7 +41,7 @@ Scene Scene::load(const std::filesystem::path& path) {
     if (ext == ".splat") {
         return io::load_splat(path);
     }
-    throw std::runtime_error("vksplat::Scene::load: unsupported extension: " + ext);
+    throw std::runtime_error("vkgsplat::Scene::load: unsupported extension: " + ext);
 }
 
 namespace io {
@@ -267,4 +267,4 @@ Scene load_splat(const std::filesystem::path& path) {
 }
 
 } // namespace io
-} // namespace vksplat
+} // namespace vkgsplat

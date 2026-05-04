@@ -1,4 +1,4 @@
-# vkSplat Architecture
+# vkGSplat Architecture
 
 ## One-line summary
 
@@ -18,7 +18,7 @@ That's fine for a research demo but creates friction for:
 - Profiling: clear seam between "what the kernel costs" and "what the
   presentation costs."
 
-vkSplat treats this as an architectural commitment, not a workaround.
+vkGSplat treats this as an architectural commitment, not a workaround.
 
 ## Block diagram (textual)
 

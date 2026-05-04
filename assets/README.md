@@ -7,7 +7,7 @@ them locally with the recipes below.
 ## Recommended starter scenes
 
 The following are the standard novel-view-synthesis benchmarks the
-position paper (`paper/vkSplat.tex`, Section "Evaluation plan") commits to
+position paper (`paper/vkGSplat.tex`, Section "Evaluation plan") commits to
 reporting against.
 
 ### Mip-NeRF 360 — `garden`, `bicycle`, `bonsai`
@@ -43,8 +43,8 @@ The script does not exist yet; placeholder for v1.
 
 | Extension | Loader               | Source                                |
 |-----------|----------------------|---------------------------------------|
-| `.ply`    | `vksplat::io::load_ply`   | Kerbl 2023 trained-model layout       |
-| `.splat`  | `vksplat::io::load_splat` | antimatter15/splat 32-byte record     |
+| `.ply`    | `vkgsplat::io::load_ply`   | Kerbl 2023 trained-model layout       |
+| `.splat`  | `vkgsplat::io::load_splat` | antimatter15/splat 32-byte record     |
 
 Both loaders are skeletons in v1 — the full property walk is on the
 roadmap (see `src/core/scene.cpp`). Until then, prefer the `.ply` files

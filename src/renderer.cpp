@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/renderer.h"
+#include "vkgsplat/renderer.h"
 
-#if defined(VKSPLAT_ENABLE_3DGS)
-#  include "vksplat/cpu_reference_renderer.h"
+#if defined(VKGSPLAT_ENABLE_3DGS)
+#  include "vkgsplat/cpu_reference_renderer.h"
 #endif
 
-#if defined(VKSPLAT_ENABLE_3DGS)
+#if defined(VKGSPLAT_ENABLE_3DGS)
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #endif
 #include <stdexcept>
 
-namespace vksplat {
+namespace vkgsplat {
 
 namespace {
 
-#if defined(VKSPLAT_ENABLE_3DGS)
+#if defined(VKGSPLAT_ENABLE_3DGS)
 std::uint8_t to_unorm8(float v) {
     const float clamped = std::clamp(v, 0.0f, 1.0f);
     return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
@@ -86,18 +86,18 @@ private:
 
 } // namespace
 
-#if defined(VKSPLAT_ENABLE_CUDA) && defined(VKSPLAT_ENABLE_3DGS)
+#if defined(VKGSPLAT_ENABLE_CUDA) && defined(VKGSPLAT_ENABLE_3DGS)
 std::unique_ptr<Renderer> make_cuda_renderer();
 #endif
 
 std::unique_ptr<Renderer> make_renderer(std::string_view backend_name) {
-#if defined(VKSPLAT_ENABLE_3DGS)
+#if defined(VKGSPLAT_ENABLE_3DGS)
     if (backend_name.empty() || backend_name == "cpp" || backend_name == "cpu" ||
         backend_name == "reference") {
         return std::make_unique<CppRenderer>();
     }
 #endif
-#if defined(VKSPLAT_ENABLE_CUDA) && defined(VKSPLAT_ENABLE_3DGS)
+#if defined(VKGSPLAT_ENABLE_CUDA) && defined(VKGSPLAT_ENABLE_3DGS)
     if (backend_name == "cuda") {
         return make_cuda_renderer();
     }
@@ -105,4 +105,4 @@ std::unique_ptr<Renderer> make_renderer(std::string_view backend_name) {
     return nullptr;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

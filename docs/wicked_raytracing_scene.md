@@ -1,6 +1,6 @@
 # Wicked Engine Ray-Traced Scene Target
 
-This document defines the first Wicked Engine scene target for vkSplat capture and reconstruction tests.
+This document defines the first Wicked Engine scene target for vkGSplat capture and reconstruction tests.
 
 ## Chosen Scene
 
@@ -22,13 +22,13 @@ After the static Cornell box works, add one moving object:
 - `third_party/WickedEngine/Content/models/DamagedHelmet.glb` for PBR material stress,
 - `third_party/WickedEngine/Content/models/dragon.obj` only after capture/export performance is acceptable.
 
-The two-frame variant should move either the camera or the inserted object by a small known transform. That gives vkSplat a controlled test for depth reprojection, screen-space velocity, primitive/object identity, disocclusion, and temporal accumulation.
+The two-frame variant should move either the camera or the inserted object by a small known transform. That gives vkGSplat a controlled test for depth reprojection, screen-space velocity, primitive/object identity, disocclusion, and temporal accumulation.
 
 ## Wicked Path Tracing Surfaces
 
 `wi::RenderPath3D_PathTracing` already allocates the surfaces we need:
 
-| Surface | Wicked format / role | vkSplat use |
+| Surface | Wicked format / role | vkGSplat use |
 | --- | --- | --- |
 | `traceResult` | `R32G32B32A32_FLOAT` path-traced accumulation target | Linear noisy seed color and high-sample reference color. |
 | `traceDepth` | `R32_FLOAT` path-traced depth | Reprojection, history rejection, disocclusion masks. |
@@ -38,7 +38,7 @@ The two-frame variant should move either the camera or the inserted object by a 
 | `depthBuffer_Main` | Depth-stencil safety target | Compatibility with existing render path and compositing. |
 | `denoiserAlbedo` | Optional OIDN albedo auxiliary | Reference auxiliary for classical/neural denoising comparisons. |
 | `denoiserNormal` | Optional OIDN normal auxiliary | Edge-aware denoising and reconstruction supervision. |
-| `denoiserResult` | Optional OIDN output | External denoiser baseline, not part of the core vkSplat path. |
+| `denoiserResult` | Optional OIDN output | External denoiser baseline, not part of the core vkGSplat path. |
 
 The useful capture point is immediately after `wi::renderer::RayTraceScene(...)` in `RenderPath3D_PathTracing::Render()`, before tonemapping, bloom, FXAA, chromatic aberration, or GUI composition.
 
@@ -60,7 +60,7 @@ The path tracer flow is:
 
 3. `RenderPath3D_PathTracing::Compose()`
    - Draws the postprocessed result to the final output.
-   - This is too late for vkSplat's reconstruction inputs because the signal has already passed through display/post effects.
+   - This is too late for vkGSplat's reconstruction inputs because the signal has already passed through display/post effects.
 
 ## Capture Contract
 
@@ -84,9 +84,9 @@ For the first two-frame test, export:
 - frame B: same scene with a small camera/object motion at sample 0,
 - optional high-sample reference for each frame after accumulation.
 
-## vkSplat Acceptance Tests
+## vkGSplat Acceptance Tests
 
-The first vkSplat-side test should not require building Wicked in CI. It should consume a tiny exported fixture with the same fields:
+The first vkGSplat-side test should not require building Wicked in CI. It should consume a tiny exported fixture with the same fields:
 
 1. Load two frame records.
 2. Reproject frame A into frame B.
@@ -98,4 +98,4 @@ Once this fixture passes, repeat with real Wicked exports.
 
 ## Notes
 
-Wicked's path tracing can run as compute ray tracing even without hardware ray tracing acceleration. That is useful for portability, but vkSplat's target remains CUDA: the C++ path validates the contract first, then the renderer/reprojection/denoising kernels move to CUDA.
+Wicked's path tracing can run as compute ray tracing even without hardware ray tracing acceleration. That is useful for portability, but vkGSplat's target remains CUDA: the C++ path validates the contract first, then the renderer/reprojection/denoising kernels move to CUDA.

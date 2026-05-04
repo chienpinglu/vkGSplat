@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/vulkan/mesh_shader_3dgs.h"
+#include "vkgsplat/vulkan/mesh_shader_3dgs.h"
 
 #include <cstring>
 #include <vector>
 
-namespace vksplat::vk {
+namespace vkgsplat::vk {
 
 MeshShader3dgsRequirements query_mesh_shader_3dgs_requirements(VkPhysicalDevice physical) {
     std::uint32_t ext_count = 0;
@@ -42,4 +42,4 @@ bool physical_device_supports_mesh_shader_3dgs(VkPhysicalDevice physical) {
     return query_mesh_shader_3dgs_requirements(physical).supported();
 }
 
-} // namespace vksplat::vk
+} // namespace vkgsplat::vk

@@ -5,7 +5,7 @@
 // feature set. The actual offscreen draw target is compiled in only once
 // shader compilation artifacts are supplied by the build.
 
-#include <vksplat/vulkan/mesh_shader_3dgs.h>
+#include <vkgsplat/vulkan/mesh_shader_3dgs.h>
 
 #include <cstdio>
 #include <vector>
@@ -25,7 +25,7 @@ bool check(VkResult r, const char* where) {
 int main() {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "vkSplat M7 offscreen gate";
+    app.pApplicationName = "vkGSplat M7 offscreen gate";
     app.apiVersion = VK_API_VERSION_1_3;
 
     VkInstanceCreateInfo ici{};
@@ -47,13 +47,13 @@ int main() {
 
     VkPhysicalDevice picked = VK_NULL_HANDLE;
     for (VkPhysicalDevice pd : devices) {
-        if (vksplat::vk::physical_device_supports_mesh_shader_3dgs(pd)) {
+        if (vkgsplat::vk::physical_device_supports_mesh_shader_3dgs(pd)) {
             picked = pd;
             break;
         }
     }
     if (picked == VK_NULL_HANDLE) {
-        std::fprintf(stderr, "No Vulkan device supports vkSplat mesh-shader requirements\n");
+        std::fprintf(stderr, "No Vulkan device supports vkGSplat mesh-shader requirements\n");
         vkDestroyInstance(instance, nullptr);
         return 77;
     }

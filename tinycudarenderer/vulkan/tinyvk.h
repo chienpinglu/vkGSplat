@@ -2,7 +2,7 @@
 //
 // tinyvk — a minimal Vulkan-shaped C API whose driver is implemented on
 // top of CUDA compute kernels. Pedagogical proof-of-concept for the
-// vkSplat thesis: keep the API surface, replace the silicon.
+// vkGSplat thesis: keep the API surface, replace the silicon.
 //
 // The naming is deliberately Vulkan-flavoured but uses a Tvk*/tvk*
 // prefix so it can coexist with the real Vulkan SDK in one process
@@ -20,12 +20,12 @@
 //      vkCmdBeginRendering                 tvkCmdBeginRendering
 //      vkQueueSubmit                       tvkQueueSubmit
 //      vkDeviceWaitIdle                    tvkDeviceWaitIdle
-//      VK_*_EXT (vendor extension)         Tvk*VKSPLAT (vendor extension)
+//      VK_*_EXT (vendor extension)         Tvk*VKGSPLAT (vendor extension)
 //
-// The single non-classical addition is tvkCmdDrawMeshVKSPLAT, a
+// The single non-classical addition is tvkCmdDrawMeshVKGSPLAT, a
 // "draw a mesh as a compute primitive" command that mirrors the
-// VK_VKSPLAT_gaussian_splatting extension declared in the parent
-// vkSplat project (../include/vksplat/extensions/) but for triangle
+// VK_VKGSPLAT_gaussian_splatting extension declared in the parent
+// vkGSplat project (../include/vkgsplat/extensions/) but for triangle
 // meshes instead of Gaussians.
 
 #pragma once
@@ -63,7 +63,7 @@ typedef struct TvkCommandBuffer_T*  TvkCommandBuffer;
 typedef struct TvkImage_T*          TvkImage;
 typedef struct TvkBuffer_T*         TvkBuffer;
 typedef struct TvkFence_T*          TvkFence;
-typedef struct TvkMeshVKSPLAT_T*    TvkMeshVKSPLAT;
+typedef struct TvkMeshVKGSPLAT_T*    TvkMeshVKGSPLAT;
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -93,7 +93,7 @@ typedef uint32_t TvkImageUsageFlags;
 
 // ---------------------------------------------------------------------------
 // Structs (sType field omitted to keep this minimal; the real VkSplat
-// implementation in ../../include/vksplat/ uses the full sType pattern.)
+// implementation in ../../include/vkgsplat/ uses the full sType pattern.)
 // ---------------------------------------------------------------------------
 typedef struct TvkApplicationInfo {
     const char* pApplicationName;
@@ -137,41 +137,41 @@ typedef struct TvkBufferCreateInfo {
 } TvkBufferCreateInfo;
 
 // ---------------------------------------------------------------------------
-// VK_VKSPLAT_mesh extension (the compute-primitive mesh draw path)
+// VK_VKGSPLAT_mesh extension (the compute-primitive mesh draw path)
 // ---------------------------------------------------------------------------
-#define TVK_VKSPLAT_MESH_EXTENSION_NAME "TVK_VKSPLAT_mesh"
+#define TVK_VKGSPLAT_MESH_EXTENSION_NAME "TVK_VKGSPLAT_mesh"
 
-typedef struct TvkMeshGeometryVKSPLAT {
+typedef struct TvkMeshGeometryVKGSPLAT {
     // Per-vertex arrays, length = vertexCount each (3 vertices per triangle,
     // already de-indexed).
     const float* pVertices;   // 4 floats per vertex (x, y, z, 1)
     const float* pNormals;    // 4 floats per vertex (nx, ny, nz, 0)
     const float* pUVs;        // 2 floats per vertex (u, v)
     uint32_t     vertexCount; // = triangleCount * 3
-} TvkMeshGeometryVKSPLAT;
+} TvkMeshGeometryVKGSPLAT;
 
-typedef struct TvkTextureDataVKSPLAT {
+typedef struct TvkTextureDataVKGSPLAT {
     const uint8_t* pPixels;   // tightly-packed BGR or BGRA
     uint32_t       width;
     uint32_t       height;
     uint32_t       bytesPerPixel; // 1 = grayscale, 3 = BGR, 4 = BGRA
-} TvkTextureDataVKSPLAT;
+} TvkTextureDataVKGSPLAT;
 
-typedef struct TvkMeshCreateInfoVKSPLAT {
-    TvkMeshGeometryVKSPLAT geometry;
-    TvkTextureDataVKSPLAT  diffuse;
-    TvkTextureDataVKSPLAT  normalMap;
-    TvkTextureDataVKSPLAT  specular;
-} TvkMeshCreateInfoVKSPLAT;
+typedef struct TvkMeshCreateInfoVKGSPLAT {
+    TvkMeshGeometryVKGSPLAT geometry;
+    TvkTextureDataVKGSPLAT  diffuse;
+    TvkTextureDataVKGSPLAT  normalMap;
+    TvkTextureDataVKGSPLAT  specular;
+} TvkMeshCreateInfoVKGSPLAT;
 
-typedef struct TvkMeshDrawInfoVKSPLAT {
+typedef struct TvkMeshDrawInfoVKGSPLAT {
     // Column-major 4x4 matrices; same convention as Vulkan/GLSL.
     float modelView[16];
     float perspective[16];
     float viewport[16];
     float lightDirEye[4];     // light direction already in eye coordinates
     float clearColor[3];      // BGR clear before the draw (ignored if mid-pass)
-} TvkMeshDrawInfoVKSPLAT;
+} TvkMeshDrawInfoVKGSPLAT;
 
 // ---------------------------------------------------------------------------
 // Entry points — instance / device / queue
@@ -209,11 +209,11 @@ TvkResult tvkCreateBuffer(TvkDevice                   device,
                           TvkBuffer*                  pBuffer);
 void      tvkDestroyBuffer(TvkDevice device, TvkBuffer buffer);
 
-// vkSplat extension: a mesh is a compute primitive owned by the driver.
-TvkResult tvkCreateMeshVKSPLAT(TvkDevice                       device,
-                               const TvkMeshCreateInfoVKSPLAT* pCreateInfo,
-                               TvkMeshVKSPLAT*                 pMesh);
-void      tvkDestroyMeshVKSPLAT(TvkDevice device, TvkMeshVKSPLAT mesh);
+// vkGSplat extension: a mesh is a compute primitive owned by the driver.
+TvkResult tvkCreateMeshVKGSPLAT(TvkDevice                       device,
+                               const TvkMeshCreateInfoVKGSPLAT* pCreateInfo,
+                               TvkMeshVKGSPLAT*                 pMesh);
+void      tvkDestroyMeshVKGSPLAT(TvkDevice device, TvkMeshVKGSPLAT mesh);
 
 // ---------------------------------------------------------------------------
 // Command buffer recording
@@ -233,9 +233,9 @@ void tvkCmdBeginRendering(TvkCommandBuffer commandBuffer,
                           float            clearR);
 void tvkCmdEndRendering  (TvkCommandBuffer commandBuffer);
 
-void tvkCmdDrawMeshVKSPLAT(TvkCommandBuffer              commandBuffer,
-                           TvkMeshVKSPLAT                mesh,
-                           const TvkMeshDrawInfoVKSPLAT* pDrawInfo);
+void tvkCmdDrawMeshVKGSPLAT(TvkCommandBuffer              commandBuffer,
+                           TvkMeshVKGSPLAT                mesh,
+                           const TvkMeshDrawInfoVKGSPLAT* pDrawInfo);
 
 // ---------------------------------------------------------------------------
 // Submission and synchronisation

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/reprojection.h"
+#include "vkgsplat/reprojection.h"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace vksplat {
+namespace vkgsplat {
 namespace {
 
 std::size_t pixel_count(const ReprojectionFrame& frame) {
@@ -204,4 +204,4 @@ ReprojectionResult reproject_history(
     return result;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

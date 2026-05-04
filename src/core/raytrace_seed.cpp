@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vksplat/raytrace_seed.h"
+#include "vkgsplat/raytrace_seed.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 
-namespace vksplat {
+namespace vkgsplat {
 namespace {
 
 float3 add(float3 a, float3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
@@ -370,4 +370,4 @@ DenoiseFrame as_denoise_frame(const RayTracingSeedFrame& frame) {
     return denoise;
 }
 
-} // namespace vksplat
+} // namespace vkgsplat

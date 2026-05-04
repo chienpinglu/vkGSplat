@@ -4,7 +4,7 @@
 // camera orbit. This complements the M6 ray-tracing seed clip, which is
 // not a 3DGS render.
 
-#include <vksplat/cpu_reference_renderer.h>
+#include <vkgsplat/cpu_reference_renderer.h>
 
 #include <algorithm>
 #include <cmath>
@@ -20,12 +20,12 @@ namespace {
 
 constexpr float pi = 3.14159265358979323846f;
 
-vksplat::Gaussian make_gaussian(vksplat::float3 position,
-                                vksplat::float3 scale,
-                                vksplat::float3 color,
+vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
+                                vkgsplat::float3 scale,
+                                vkgsplat::float3 color,
                                 float opacity_logit) {
     constexpr float sh_c0 = 0.28209479177387814f;
-    vksplat::Gaussian g{};
+    vkgsplat::Gaussian g{};
     g.position = position;
     g.scale_log = { std::log(scale.x), std::log(scale.y), std::log(scale.z) };
     g.rotation = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -44,7 +44,7 @@ std::uint8_t to_byte(float value) {
 }
 
 void write_ppm(const std::filesystem::path& path,
-               const std::vector<vksplat::float4>& pixels,
+               const std::vector<vkgsplat::float4>& pixels,
                std::uint32_t width,
                std::uint32_t height) {
     std::ofstream out(path, std::ios::binary);
@@ -63,19 +63,19 @@ std::filesystem::path frame_path(const std::filesystem::path& prefix, int frame)
     return name.str();
 }
 
-void add_dot(std::vector<vksplat::Gaussian>& gaussians,
-             vksplat::float3 position,
-             vksplat::float3 color,
+void add_dot(std::vector<vkgsplat::Gaussian>& gaussians,
+             vkgsplat::float3 position,
+             vkgsplat::float3 color,
              float scale = 0.008f,
              float opacity_logit = 9.0f) {
     gaussians.push_back(make_gaussian(position, { scale, scale, scale }, color, opacity_logit));
 }
 
-void add_line(std::vector<vksplat::Gaussian>& gaussians,
-              vksplat::float3 a,
-              vksplat::float3 b,
+void add_line(std::vector<vkgsplat::Gaussian>& gaussians,
+              vkgsplat::float3 a,
+              vkgsplat::float3 b,
               int steps,
-              vksplat::float3 color,
+              vkgsplat::float3 color,
               float scale = 0.007f) {
     for (int i = 0; i <= steps; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(steps);
@@ -89,12 +89,12 @@ void add_line(std::vector<vksplat::Gaussian>& gaussians,
     }
 }
 
-void add_glyph(std::vector<vksplat::Gaussian>& gaussians,
+void add_glyph(std::vector<vkgsplat::Gaussian>& gaussians,
                const char* const rows[7],
                float x0,
                float y0,
                float z,
-               vksplat::float3 color) {
+               vkgsplat::float3 color) {
     constexpr float pitch = 0.040f;
     for (int y = 0; y < 7; ++y) {
         for (int x = 0; x < 5; ++x) {
@@ -111,8 +111,8 @@ void add_glyph(std::vector<vksplat::Gaussian>& gaussians,
     }
 }
 
-vksplat::Scene make_scene() {
-    std::vector<vksplat::Gaussian> gaussians;
+vkgsplat::Scene make_scene() {
+    std::vector<vkgsplat::Gaussian> gaussians;
 
     static const char* const glyph_3[7] = {
         "####.",
@@ -183,7 +183,7 @@ vksplat::Scene make_scene() {
                  0.0045f);
     }
 
-    vksplat::Scene scene;
+    vkgsplat::Scene scene;
     scene.resize(gaussians.size());
     std::copy(gaussians.begin(), gaussians.end(), scene.gaussians().begin());
     return scene;
@@ -200,12 +200,12 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(parent);
     }
 
-    const vksplat::Scene scene = make_scene();
+    const vkgsplat::Scene scene = make_scene();
 
-    vksplat::RenderParams params;
+    vkgsplat::RenderParams params;
     params.background = { 0.015f, 0.015f, 0.02f };
 
-    vksplat::CpuReferenceRenderOptions options;
+    vkgsplat::CpuReferenceRenderOptions options;
     options.tile_size = 16;
     options.splat_extent_sigma = 1.35f;
 
@@ -217,18 +217,18 @@ int main(int argc, char** argv) {
         const float angle = -0.95f + 1.90f * t;
         const float radius = 1.75f;
 
-        vksplat::Camera camera;
+        vkgsplat::Camera camera;
         camera.set_resolution(width, height);
         camera.set_perspective(0.84f, static_cast<float>(width) / static_cast<float>(height), 0.1f, 10.0f);
         camera.look_at({ std::sin(angle) * radius, 0.10f, std::cos(angle) * radius },
                        { 0.0f, -0.04f, 0.05f },
                        { 0.0f, 1.0f, 0.0f });
 
-        const auto rendered = vksplat::render_3dgs_cpu_reference(
+        const auto rendered = vkgsplat::render_3dgs_cpu_reference(
             scene,
             camera,
             params,
-            { width, height, vksplat::PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
+            { width, height, vkgsplat::PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
             options);
 
         write_ppm(frame_path(prefix, frame_index), rendered.pixels, width, height);

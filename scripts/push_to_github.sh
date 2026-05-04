@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot: get vkSplat onto github.com/chienpinglu/vkSplat.
+# One-shot: get vkGSplat onto github.com/chienpinglu/vkGSplat.
 # Handles whatever half-state `gh repo create` may have left behind.
 #
 # Usage:
@@ -9,7 +9,7 @@
 set -e
 
 OWNER="chienpinglu"
-REPO="vkSplat"
+REPO="vkGSplat"
 DESC="Compute-first Vulkan path for robotics synthetic data on AI accelerators"
 URL="https://github.com/${OWNER}/${REPO}.git"
 

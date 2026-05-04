@@ -3,14 +3,14 @@
 // Smoke test for core POD types — guards against accidental layout
 // changes that would break the .cu / .cpp boundary.
 
-#include <vksplat/types.h>
+#include <vkgsplat/types.h>
 
 #include <cstddef>
 #include <cstdio>
 #include <type_traits>
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     static_assert(std::is_trivially_copyable_v<float3>);
     static_assert(std::is_trivially_copyable_v<float4>);

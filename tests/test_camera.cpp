@@ -2,14 +2,14 @@
 //
 // Smoke test for the Camera class: identity-ish look_at + perspective.
 
-#include <vksplat/camera.h>
+#include <vkgsplat/camera.h>
 
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     Camera c;
     c.set_resolution(800, 600);

@@ -4,15 +4,15 @@
 // 8-bit format for general compatibility; SDG production paths skip
 // the swapchain entirely and write to interop images instead.
 
-#include "vksplat/vulkan/swapchain.h"
+#include "vkgsplat/vulkan/swapchain.h"
 
-#include "vksplat/vulkan/device.h"
+#include "vkgsplat/vulkan/device.h"
 
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 
-namespace vksplat::vk {
+namespace vkgsplat::vk {
 
 namespace {
 
@@ -171,4 +171,4 @@ Swapchain& Swapchain::operator=(Swapchain&& o) noexcept {
     return *this;
 }
 
-} // namespace vksplat::vk
+} // namespace vkgsplat::vk

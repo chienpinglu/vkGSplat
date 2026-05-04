@@ -1,10 +1,10 @@
 # Open-Source Vulkan Game Engine Survey
 
-vkSplat needs realistic Vulkan programs to capture frame data from: color, depth, motion vectors, camera matrices, materials, object IDs, and eventually shader/scene metadata. The goal is not to depend on a game engine, but to use one as a representative Vulkan workload while we build the 3DGS reconstruction stack.
+vkGSplat needs realistic Vulkan programs to capture frame data from: color, depth, motion vectors, camera matrices, materials, object IDs, and eventually shader/scene metadata. The goal is not to depend on a game engine, but to use one as a representative Vulkan workload while we build the 3DGS reconstruction stack.
 
 ## Shortlist
 
-| Engine / framework | Repo | Language | License | Vulkan status | Fit for vkSplat |
+| Engine / framework | Repo | Language | License | Vulkan status | Fit for vkGSplat |
 | --- | --- | --- | --- | --- | --- |
 | Wicked Engine | <https://github.com/turanszkij/WickedEngine> | C++ | MIT | Vulkan backend plus DX12 and other platforms | Best first target: renderer-focused, modern, smaller than Godot, good for capture hooks. |
 | The Forge | <https://github.com/ConfettiFX/The-Forge> | C/C++ | Apache-2.0 | Mature multi-API rendering framework including Vulkan | Best backend architecture reference; less of a full game engine. |
@@ -12,7 +12,7 @@ vkSplat needs realistic Vulkan programs to capture frame data from: color, depth
 | Acid | <https://github.com/EQMG/Acid> | C++17 | MIT | Vulkan-only renderer | Smaller Vulkan-only game engine; useful second-tier study target. |
 | NcEngine | <https://github.com/NcStudios/NcEngine> | C++23 | Open source | Vulkan renderer | Modern and clean, but early-stage. |
 | Lugdunum | <https://github.com/Lugdunum3D/Lugdunum> | C++ | Open source | Vulkan backend | Interesting but lower priority. |
-| Kaiju | <https://github.com/KaijuEngine/kaiju> | Go | Open source | Vulkan renderer/editor | Interesting editor/runtime, but language mismatch for vkSplat. |
+| Kaiju | <https://github.com/KaijuEngine/kaiju> | Go | Open source | Vulkan renderer/editor | Interesting editor/runtime, but language mismatch for vkGSplat. |
 
 ## Recommendation
 
@@ -30,7 +30,7 @@ Use **The Forge** as an architecture reference for clean multi-backend rendering
 
 Use **Godot** later when we want a large production engine target with editor workflows, imported assets, animation, scripting, physics, and real user scenes.
 
-## vkSplat Capture Priorities
+## vkGSplat Capture Priorities
 
 The first engine integration should extract:
 
@@ -53,11 +53,11 @@ Local checkout:
 - Upstream: <https://github.com/turanszkij/WickedEngine>
 - Commit inspected: `8e0c260e`
 
-Wicked Engine is a strong first Vulkan workload for vkSplat because it is compact enough to instrument, but still exposes realistic renderer state. The Vulkan backend reports SPIR-V as its shader format and builds `VkShaderModule` objects in `GraphicsDevice_Vulkan::CreateShader`, which is the natural hook for collecting shader bytecode and feeding the SPIR-V-to-C / SPIR-V-to-CUDA translators.
+Wicked Engine is a strong first Vulkan workload for vkGSplat because it is compact enough to instrument, but still exposes realistic renderer state. The Vulkan backend reports SPIR-V as its shader format and builds `VkShaderModule` objects in `GraphicsDevice_Vulkan::CreateShader`, which is the natural hook for collecting shader bytecode and feeding the SPIR-V-to-C / SPIR-V-to-CUDA translators.
 
 The first render-path capture surface should be `wiRenderPath3D`. It already owns most of the temporal and screen-space data needed for reconstruction:
 
-| Wicked Engine surface | Why vkSplat needs it |
+| Wicked Engine surface | Why vkGSplat needs it |
 | --- | --- |
 | `rtMain` | Main color frame. |
 | `depthBuffer_Copy` | Current resolved/copied depth for reprojection and visibility. |
@@ -81,5 +81,5 @@ Near-term plan for Wicked Engine:
 
 1. Build a read-only capture shim that logs shader modules, render pass attachments, and `wiRenderPath3D` texture descriptors without changing rendering.
 2. Add a Cornell box path-tracing capture path, described in `docs/wicked_raytracing_scene.md`, that exports color, depth, velocity or derived motion, primitive ID, and camera matrices for two adjacent frames.
-3. Feed those two frames into vkSplat's CPU tiled renderer/reconstruction tests to validate depth reprojection and motion-map consistency.
-4. Once the capture contract is stable, translate selected Wicked SPIR-V shaders through vkSplat's restricted SPIR-V translators and compare CPU/CUDA-friendly outputs against the original Vulkan frame data.
+3. Feed those two frames into vkGSplat's CPU tiled renderer/reconstruction tests to validate depth reprojection and motion-map consistency.
+4. Once the capture contract is stable, translate selected Wicked SPIR-V shaders through vkGSplat's restricted SPIR-V translators and compare CPU/CUDA-friendly outputs against the original Vulkan frame data.

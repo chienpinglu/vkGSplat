@@ -4,7 +4,7 @@
 // a tiny projected-splat/tile-range fixture to CUDA, render, copy back,
 // and validate the same ordering invariant as the CPU reference.
 
-#include <vksplat/cuda/tile_renderer.h>
+#include <vkgsplat/cuda/tile_renderer.h>
 
 #include <cuda_runtime.h>
 
@@ -26,8 +26,8 @@ namespace {
 } // namespace
 
 int main() {
-    using namespace vksplat;
-    using namespace vksplat::cuda;
+    using namespace vkgsplat;
+    using namespace vkgsplat::cuda;
 
     int device_count = 0;
     CHECK_CUDA(cudaGetDeviceCount(&device_count));

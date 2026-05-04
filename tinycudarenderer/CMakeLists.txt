@@ -9,7 +9,7 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-# When this directory is built standalone (not via the parent vkSplat
+# When this directory is built standalone (not via the parent vkGSplat
 # tree) we still want a project() call so language detection runs.
 if(NOT PROJECT_NAME)
     project(tinycudarenderer LANGUAGES CXX)

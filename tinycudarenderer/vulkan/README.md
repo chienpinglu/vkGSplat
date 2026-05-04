@@ -1,6 +1,6 @@
 # tinycudarenderer / vulkan
 
-The smallest interesting demonstration of the vkSplat thesis: a
+The smallest interesting demonstration of the vkGSplat thesis: a
 Vulkan-shaped application whose underlying driver is implemented as
 CUDA compute kernels, with no fixed-function graphics hardware in the
 loop.
@@ -18,12 +18,12 @@ implementation.
 The driver (`tinyvk_driver.cpp`) is plain C++ that includes
 `../cuda/cuda_renderer.h`, which exposes the CUDA-side renderer
 through a host-callable shim. When the application records
-`tvkCmdDrawMeshVKSPLAT` and calls `tvkQueueSubmit`, the driver walks
+`tvkCmdDrawMeshVKGSPLAT` and calls `tvkQueueSubmit`, the driver walks
 the recorded commands and translates each one into a CUDA call into
 that shim.
 
 This is exactly the structure the position paper at
-`../../paper/vkSplat.tex` proposes for the production vkSplat
+`../../paper/vkGSplat.tex` proposes for the production vkGSplat
 implementation, in 200 lines instead of 20,000.
 
 ## What is "minimal Vulkan API support"?
@@ -44,10 +44,10 @@ The `Tvk*` API surface in `tinyvk.h` covers:
   variant — no render-pass objects).
 - **Synchronisation primitives** — `tvkQueueSubmit`,
   `tvkDeviceWaitIdle`, opaque `TvkFence` (currently a no-op stub).
-- **One vendor extension**: `TVK_VKSPLAT_mesh`. `tvkCreateMeshVKSPLAT`
-  and `tvkCmdDrawMeshVKSPLAT` mirror the
-  `VK_VKSPLAT_gaussian_splatting` extension declared by the parent
-  vkSplat project (`include/vksplat/extensions/`), but for triangle
+- **One vendor extension**: `TVK_VKGSPLAT_mesh`. `tvkCreateMeshVKGSPLAT`
+  and `tvkCmdDrawMeshVKGSPLAT` mirror the
+  `VK_VKGSPLAT_gaussian_splatting` extension declared by the parent
+  vkGSplat project (`include/vkgsplat/extensions/`), but for triangle
   meshes — exactly the compute-primitive draw path the paper
   advocates.
 
@@ -56,11 +56,11 @@ What is **not** here:
   rendering path is sufficient.
 - Shader objects, pipeline layouts, descriptor sets — the mesh
   extension carries everything the kernel needs in
-  `TvkMeshDrawInfoVKSPLAT`.
+  `TvkMeshDrawInfoVKGSPLAT`.
 - Memory-allocation objects (`vkAllocateMemory`) — images and buffers
   own their device backing directly.
 - Swapchain and presentation — the demo is headless, like the SDG
-  flow vkSplat targets.
+  flow vkGSplat targets.
 
 ## Files
 
@@ -85,7 +85,7 @@ What is **not** here:
 
 ## Build & run
 
-Built as part of the parent vkSplat tree. See `../README.md`. The
+Built as part of the parent vkGSplat tree. See `../README.md`. The
 output is `build/tinycudarenderer/vulkan/tinycudarenderer_vulkan`,
 runnable like the other two front-ends:
 

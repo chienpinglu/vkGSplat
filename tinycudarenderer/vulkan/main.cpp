@@ -13,7 +13,7 @@
 //   ../cuda/main.cu       : direct CUDA rasterizer (raw kernels).
 //   ./main.cpp (this file): Vulkan-shaped API call sequence; the
 //                            backend is CUDA but the application is
-//                            unaware of it. This is the vkSplat thesis
+//                            unaware of it. This is the vkGSplat thesis
 //                            in microcosm.
 
 #include "tinyvk.h"
@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
                          /*G=*/195.f / 255.f,
                          /*R=*/177.f / 255.f);
 
-    std::vector<TvkMeshVKSPLAT> meshes;
+    std::vector<TvkMeshVKGSPLAT> meshes;
     std::vector<HostModel>      pinned_hosts; // keep the pointers alive till submit
     pinned_hosts.reserve(argc - 1);
 
@@ -242,37 +242,37 @@ int main(int argc, char** argv) {
         pinned_hosts.push_back(load_model(argv[m]));
         const HostModel& hm = pinned_hosts.back();
 
-        TvkMeshGeometryVKSPLAT geom{};
+        TvkMeshGeometryVKGSPLAT geom{};
         geom.pVertices   = hm.verts.data();
         geom.pNormals    = hm.norms.data();
         geom.pUVs        = hm.tex.data();
         geom.vertexCount = static_cast<uint32_t>(hm.nfaces) * 3u;
 
-        auto fill = [](TvkTextureDataVKSPLAT& t, const HostTexture& s) {
+        auto fill = [](TvkTextureDataVKGSPLAT& t, const HostTexture& s) {
             t.pPixels       = s.data.empty() ? nullptr : s.data.data();
             t.width         = static_cast<uint32_t>(s.w);
             t.height        = static_cast<uint32_t>(s.h);
             t.bytesPerPixel = static_cast<uint32_t>(s.bpp);
         };
 
-        TvkMeshCreateInfoVKSPLAT mci{};
+        TvkMeshCreateInfoVKGSPLAT mci{};
         mci.geometry = geom;
         fill(mci.diffuse,   hm.diffuse);
         fill(mci.normalMap, hm.normalmap);
         fill(mci.specular,  hm.specular);
 
-        TvkMeshVKSPLAT mesh = nullptr;
-        check(tvkCreateMeshVKSPLAT(device, &mci, &mesh), "tvkCreateMeshVKSPLAT");
+        TvkMeshVKGSPLAT mesh = nullptr;
+        check(tvkCreateMeshVKGSPLAT(device, &mci, &mesh), "tvkCreateMeshVKGSPLAT");
         meshes.push_back(mesh);
 
-        TvkMeshDrawInfoVKSPLAT dinfo{};
+        TvkMeshDrawInfoVKGSPLAT dinfo{};
         std::memcpy(dinfo.modelView,   view,     sizeof(view));
         std::memcpy(dinfo.perspective, proj,     sizeof(proj));
         std::memcpy(dinfo.viewport,    viewport, sizeof(viewport));
         std::memcpy(dinfo.lightDirEye, light_eye, sizeof(light_eye));
         dinfo.clearColor[0] = 0.f; dinfo.clearColor[1] = 0.f; dinfo.clearColor[2] = 0.f;
 
-        tvkCmdDrawMeshVKSPLAT(cmdbuf, mesh, &dinfo);
+        tvkCmdDrawMeshVKGSPLAT(cmdbuf, mesh, &dinfo);
     }
 
     tvkCmdEndRendering(cmdbuf);
@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[tinyvk-app] wrote framebuffer.tga (%dx%d)\n", width, height);
 
     // === Teardown ==========================================================
-    for (auto m : meshes) tvkDestroyMeshVKSPLAT(device, m);
+    for (auto m : meshes) tvkDestroyMeshVKGSPLAT(device, m);
     tvkFreeCommandBuffers(device, cmdbuf);
     tvkDestroyImage(device, color);
     tvkDestroyDevice(device);

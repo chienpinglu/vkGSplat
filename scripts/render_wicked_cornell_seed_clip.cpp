@@ -2,12 +2,12 @@
 //
 // Generates a visual capture-contract clip from Wicked Engine's Cornell-box
 // OBJ asset. MoltenVK on this Mac does not expose Vulkan ray tracing, so this
-// loads the same Wicked geometry and sends it through vkSplat's CPU
+// loads the same Wicked geometry and sends it through vkGSplat's CPU
 // ray-tracing seed, reprojection, and CPU or Metal denoise path.
 
-#include <vksplat/raytrace_seed.h>
-#if defined(VKSPLAT_ENABLE_METAL)
-#include <vksplat/metal/denoise.h>
+#include <vkgsplat/raytrace_seed.h>
+#if defined(VKGSPLAT_ENABLE_METAL)
+#include <vkgsplat/metal/denoise.h>
 #endif
 
 #include <algorithm>
@@ -39,12 +39,12 @@ struct ObjFace {
 };
 
 struct ObjData {
-    std::vector<vksplat::float3> vertices;
+    std::vector<vkgsplat::float3> vertices;
     std::vector<ObjFace> faces;
-    std::map<std::string, vksplat::float4> materials;
+    std::map<std::string, vkgsplat::float4> materials;
 };
 
-vksplat::float4 color(float r, float g, float b) {
+vkgsplat::float4 color(float r, float g, float b) {
     return { r, g, b, 1.0f };
 }
 
@@ -62,7 +62,7 @@ std::string trim(const std::string& line) {
     return line.substr(begin, end - begin + 1);
 }
 
-vksplat::float4 polished_material_color(const std::string& name, vksplat::float4 kd) {
+vkgsplat::float4 polished_material_color(const std::string& name, vkgsplat::float4 kd) {
     if (name == "white") {
         return color(0.78f, 0.78f, 0.72f);
     }
@@ -75,13 +75,13 @@ vksplat::float4 polished_material_color(const std::string& name, vksplat::float4
     return color(kd.x * 0.85f, kd.y * 0.85f, kd.z * 0.85f);
 }
 
-std::map<std::string, vksplat::float4> load_mtl(const std::filesystem::path& path) {
+std::map<std::string, vkgsplat::float4> load_mtl(const std::filesystem::path& path) {
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("failed to open material file: " + path.string());
     }
 
-    std::map<std::string, vksplat::float4> materials;
+    std::map<std::string, vkgsplat::float4> materials;
     std::string current;
     std::string line;
     while (std::getline(in, line)) {
@@ -146,7 +146,7 @@ ObjData load_obj(const std::filesystem::path& path) {
         } else if (tag == "usemtl") {
             ss >> current_material;
         } else if (tag == "v") {
-            vksplat::float3 vertex{};
+            vkgsplat::float3 vertex{};
             ss >> vertex.x >> vertex.y >> vertex.z;
             obj.vertices.push_back(vertex);
         } else if (tag == "f") {
@@ -177,13 +177,13 @@ ObjData load_obj(const std::filesystem::path& path) {
     return obj;
 }
 
-vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
-    vksplat::float3 min_v{
+vkgsplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
+    vkgsplat::float3 min_v{
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
     };
-    vksplat::float3 max_v{
+    vkgsplat::float3 max_v{
         -std::numeric_limits<float>::max(),
         -std::numeric_limits<float>::max(),
         -std::numeric_limits<float>::max(),
@@ -197,7 +197,7 @@ vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
         max_v.z = std::max(max_v.z, v.z);
     }
 
-    const vksplat::float3 center{
+    const vkgsplat::float3 center{
         (min_v.x + max_v.x) * 0.5f,
         (min_v.y + max_v.y) * 0.5f,
         (min_v.z + max_v.z) * 0.5f,
@@ -207,8 +207,8 @@ vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
     const float extent_z = max_v.z - min_v.z;
     const float scale = 2.35f / std::max({ extent_x, extent_y, extent_z });
 
-    auto transform = [&](vksplat::float3 v) {
-        return vksplat::float3{
+    auto transform = [&](vkgsplat::float3 v) {
+        return vkgsplat::float3{
             (v.x - center.x) * scale,
             (v.y - center.y) * scale,
             -(v.z - center.z) * scale + 3.25f,
@@ -216,7 +216,7 @@ vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
     };
 
     std::map<std::string, std::uint32_t> material_indices;
-    vksplat::RayTracingScene scene;
+    vkgsplat::RayTracingScene scene;
     auto material_index = [&](const std::string& name) {
         const auto existing = material_indices.find(name);
         if (existing != material_indices.end()) {
@@ -224,7 +224,7 @@ vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
         }
 
         const auto material = obj.materials.find(name);
-        const vksplat::float4 base_color =
+        const vkgsplat::float4 base_color =
             material != obj.materials.end() ? material->second : color(0.78f, 0.78f, 0.72f);
         const std::uint32_t index = static_cast<std::uint32_t>(scene.materials.size());
         scene.materials.push_back({ base_color });
@@ -248,12 +248,12 @@ vksplat::RayTracingScene make_scene_from_obj(const ObjData& obj) {
     return scene;
 }
 
-std::vector<vksplat::float4> compose_panel(const vksplat::RayTracingSeedFrame& seed,
-                                           const vksplat::SvgfDenoiseResult& denoised) {
+std::vector<vkgsplat::float4> compose_panel(const vkgsplat::RayTracingSeedFrame& seed,
+                                           const vkgsplat::SvgfDenoiseResult& denoised) {
     constexpr std::uint32_t divider = 4;
     const std::uint32_t panel_width = seed.width * 2 + divider;
     const std::uint32_t panel_height = seed.height;
-    std::vector<vksplat::float4> panel(
+    std::vector<vkgsplat::float4> panel(
         static_cast<std::size_t>(panel_width) * panel_height,
         color(0.02f, 0.02f, 0.025f));
 
@@ -275,7 +275,7 @@ std::vector<vksplat::float4> compose_panel(const vksplat::RayTracingSeedFrame& s
 }
 
 void write_ppm(const std::filesystem::path& path,
-               const std::vector<vksplat::float4>& pixels,
+               const std::vector<vkgsplat::float4>& pixels,
                std::uint32_t width,
                std::uint32_t height) {
     std::ofstream out(path, std::ios::binary);
@@ -306,28 +306,28 @@ DenoiseBackend parse_backend(const std::string& backend) {
     throw std::runtime_error("backend must be 'cpu' or 'metal'");
 }
 
-vksplat::SvgfDenoiseResult run_denoise_backend(
+vkgsplat::SvgfDenoiseResult run_denoise_backend(
     DenoiseBackend backend,
-    const vksplat::RayTracingSeedFrame& seed,
-    const vksplat::ReprojectionResult& reprojected,
-    const vksplat::SvgfDenoiseOptions& options) {
+    const vkgsplat::RayTracingSeedFrame& seed,
+    const vkgsplat::ReprojectionResult& reprojected,
+    const vkgsplat::SvgfDenoiseOptions& options) {
     if (backend == DenoiseBackend::Cpu) {
-        return vksplat::denoise_svgf_baseline(
-            vksplat::as_denoise_frame(seed),
+        return vkgsplat::denoise_svgf_baseline(
+            vkgsplat::as_denoise_frame(seed),
             reprojected,
             options);
     }
 
-#if defined(VKSPLAT_ENABLE_METAL)
-    if (!vksplat::metal::is_available()) {
+#if defined(VKGSPLAT_ENABLE_METAL)
+    if (!vkgsplat::metal::is_available()) {
         throw std::runtime_error("Metal backend was requested, but no Metal device is available");
     }
-    return vksplat::metal::denoise_svgf_baseline(
-        vksplat::as_denoise_frame(seed),
+    return vkgsplat::metal::denoise_svgf_baseline(
+        vkgsplat::as_denoise_frame(seed),
         reprojected,
         options);
 #else
-    throw std::runtime_error("Metal backend was requested, but this binary was built without VKSPLAT_ENABLE_METAL");
+    throw std::runtime_error("Metal backend was requested, but this binary was built without VKGSPLAT_ENABLE_METAL");
 #endif
 }
 
@@ -347,9 +347,9 @@ int main(int argc, char** argv) {
     }
 
     const ObjData obj = load_obj(obj_path);
-    const vksplat::RayTracingScene scene = make_scene_from_obj(obj);
+    const vkgsplat::RayTracingScene scene = make_scene_from_obj(obj);
 
-    vksplat::RayTracingSeedFrame previous_seed;
+    vkgsplat::RayTracingSeedFrame previous_seed;
     bool has_previous = false;
 
     constexpr int frame_count = 36;
@@ -359,7 +359,7 @@ int main(int argc, char** argv) {
         const float height = -0.04f + 0.12f * std::sin((t * 2.0f - 0.5f) * pi);
         const float radius = 1.18f;
 
-        vksplat::RayTracingCamera camera;
+        vkgsplat::RayTracingCamera camera;
         camera.eye = { std::sin(angle) * radius, height, 0.12f + (1.0f - std::cos(angle)) * 0.22f };
         camera.target = { -std::sin(angle) * 0.30f, -0.06f, 3.25f };
         camera.up = { 0.0f, 1.0f, 0.0f };
@@ -367,31 +367,31 @@ int main(int argc, char** argv) {
         camera.z_near = 0.05f;
         camera.z_far = 16.0f;
 
-        vksplat::RayTracingDispatch dispatch;
+        vkgsplat::RayTracingDispatch dispatch;
         dispatch.width = 256;
         dispatch.height = 144;
         dispatch.samples_per_pixel = 1;
         dispatch.seed = 19001u + static_cast<std::uint32_t>(frame_index * 131);
         dispatch.radiance_noise = 0.42f;
 
-        const vksplat::RayTracingSeedFrame seed =
-            vksplat::trace_raytracing_seed(scene, camera, dispatch);
+        const vkgsplat::RayTracingSeedFrame seed =
+            vkgsplat::trace_raytracing_seed(scene, camera, dispatch);
 
-        vksplat::ReprojectionResult reprojected;
+        vkgsplat::ReprojectionResult reprojected;
         if (has_previous) {
-            const vksplat::CameraMotionMap motion = vksplat::compute_camera_motion_map(
+            const vkgsplat::CameraMotionMap motion = vkgsplat::compute_camera_motion_map(
                 seed.width,
                 seed.height,
                 seed.ndc_depth,
                 seed.inverse_view_projection,
                 previous_seed.view_projection);
 
-            vksplat::ReprojectionOptions reprojection_options;
+            vkgsplat::ReprojectionOptions reprojection_options;
             reprojection_options.history_weight = 0.82f;
             reprojection_options.depth_threshold = 0.22f;
-            reprojected = vksplat::reproject_history(
-                vksplat::as_reprojection_frame(previous_seed),
-                vksplat::as_reprojection_frame(seed),
+            reprojected = vkgsplat::reproject_history(
+                vkgsplat::as_reprojection_frame(previous_seed),
+                vkgsplat::as_reprojection_frame(seed),
                 motion.current_to_previous_px,
                 reprojection_options);
         } else {
@@ -402,12 +402,12 @@ int main(int argc, char** argv) {
             reprojected.valid_history.assign(count, 0);
         }
 
-        vksplat::SvgfDenoiseOptions denoise_options;
+        vkgsplat::SvgfDenoiseOptions denoise_options;
         denoise_options.history_weight = 0.48f;
         denoise_options.depth_threshold = 0.18f;
         denoise_options.spatial_radius = 1;
 
-        const vksplat::SvgfDenoiseResult denoised =
+        const vkgsplat::SvgfDenoiseResult denoised =
             run_denoise_backend(backend, seed, reprojected, denoise_options);
 
         const auto panel = compose_panel(seed, denoised);

@@ -4,7 +4,7 @@
 // toward reprojected history, while primitive/depth discontinuities keep
 // unrelated bright pixels from bleeding across edges.
 
-#include <vksplat/denoise.h>
+#include <vkgsplat/denoise.h>
 
 #include <cmath>
 #include <cstdio>
@@ -15,14 +15,14 @@ bool near(float a, float b, float eps = 1.0e-4f) {
     return std::abs(a - b) <= eps;
 }
 
-vksplat::float4 color(float r, float g, float b) {
+vkgsplat::float4 color(float r, float g, float b) {
     return { r, g, b, 1.0f };
 }
 
 } // namespace
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     constexpr std::uint32_t width = 3;
     constexpr std::uint32_t height = 3;

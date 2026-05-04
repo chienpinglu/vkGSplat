@@ -1,6 +1,6 @@
-# vkSplat Test Report
+# vkGSplat Test Report
 
-This report describes the current CTest suite, what each test validates, and which tests produce visual output. Most tests are validation-only executables: they return success/failure and do not write files. 3DGS is paused in the default build; the 3DGS artifacts and tests below are optional and require `-DVKSPLAT_ENABLE_3DGS=ON`.
+This report describes the current CTest suite, what each test validates, and which tests produce visual output. Most tests are validation-only executables: they return success/failure and do not write files. 3DGS is paused in the default build; the 3DGS artifacts and tests below are optional and require `-DVKGSPLAT_ENABLE_3DGS=ON`.
 
 ## Optional CPU 3DGS Image
 
@@ -11,9 +11,9 @@ The image is a 16x16 CPU reference render scaled to 512x512 for inspection. It c
 Regenerate it with:
 
 ```sh
-cmake -S . -B build-cpu-3dgs -DVKSPLAT_ENABLE_VULKAN=OFF -DVKSPLAT_ENABLE_CUDA=OFF -DVKSPLAT_ENABLE_3DGS=ON -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build-cpu-3dgs -DVKGSPLAT_ENABLE_VULKAN=OFF -DVKGSPLAT_ENABLE_CUDA=OFF -DVKGSPLAT_ENABLE_3DGS=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-cpu-3dgs
-c++ -std=c++20 -Iinclude scripts/render_cpu_test_image.cpp build-cpu-3dgs/libvksplat.a -o build-cpu-3dgs/render_cpu_test_image
+c++ -std=c++20 -Iinclude scripts/render_cpu_test_image.cpp build-cpu-3dgs/libvkgsplat.a -o build-cpu-3dgs/render_cpu_test_image
 build-cpu-3dgs/render_cpu_test_image docs/images/cpu_3dgs_render.ppm
 magick docs/images/cpu_3dgs_render.ppm -filter point -resize 512x512 docs/images/cpu_3dgs_render.png
 ```
@@ -31,7 +31,7 @@ Representative stills:
 Regenerate it with:
 
 ```sh
-c++ -std=c++20 -Iinclude scripts/render_3dgs_camera_clip.cpp build-cpu-3dgs/libvksplat.a -o build-cpu-3dgs/render_3dgs_camera_clip
+c++ -std=c++20 -Iinclude scripts/render_3dgs_camera_clip.cpp build-cpu-3dgs/libvkgsplat.a -o build-cpu-3dgs/render_3dgs_camera_clip
 build-cpu-3dgs/render_3dgs_camera_clip docs/images/cpu_3dgs_camera_clip
 ffmpeg -y -framerate 12 -i docs/images/cpu_3dgs_camera_clip_%03d.ppm -pix_fmt yuv420p docs/images/cpu_3dgs_camera_clip.mp4
 magick -delay 8 -loop 0 docs/images/cpu_3dgs_camera_clip_*.ppm -layers Optimize docs/images/cpu_3dgs_camera_clip.gif
@@ -53,7 +53,7 @@ Representative stills:
 Regenerate it with:
 
 ```sh
-c++ -std=c++20 -Iinclude scripts/render_raytrace_seed_clip.cpp build-cpu/libvksplat.a -o build-cpu/render_raytrace_seed_clip
+c++ -std=c++20 -Iinclude scripts/render_raytrace_seed_clip.cpp build-cpu/libvkgsplat.a -o build-cpu/render_raytrace_seed_clip
 build-cpu/render_raytrace_seed_clip docs/images/raytrace_seed_clip
 ffmpeg -y -framerate 10 -i docs/images/raytrace_seed_clip_%03d.ppm -vf scale=1036:288:flags=neighbor -pix_fmt yuv420p docs/images/raytrace_seed_clip.mp4
 magick -delay 10 -loop 0 docs/images/raytrace_seed_clip_*.ppm -filter point -resize 400% -layers Optimize docs/images/raytrace_seed_clip.gif
@@ -73,7 +73,7 @@ These clips use Wicked Engine's `cornellbox.obj` geometry and material colors,
 but they are not native Wicked Vulkan ray-tracing images. The local Wicked
 Vulkan run on MoltenVK reports `capability.raytracing=no`, so the generator
 loads the same OBJ/MTL asset, triangulates the quads, normalizes it into the
-vkSplat CPU ray-tracing seed scene, and feeds the frames through camera-motion
+vkGSplat CPU ray-tracing seed scene, and feeds the frames through camera-motion
 reprojection plus SVGF-style denoising. The CPU clip runs denoise on the CPU;
 the Metal clip runs the denoise stage on the M4 GPU. Each frame is a
 side-by-side panel: noisy seed frame on the left, denoised reconstruction on
@@ -93,8 +93,8 @@ Regenerate them with:
 ```sh
 cmake --build build-cpu --parallel 8
 cmake --build build-metal --parallel 8
-c++ -std=c++20 -Iinclude scripts/render_wicked_cornell_seed_clip.cpp build-cpu/libvksplat.a -o build-cpu/render_wicked_cornell_seed_clip
-c++ -std=c++20 -DVKSPLAT_ENABLE_METAL=1 -Iinclude scripts/render_wicked_cornell_seed_clip.cpp build-metal/libvksplat.a -framework Metal -framework Foundation -o build-metal/render_wicked_cornell_seed_clip
+c++ -std=c++20 -Iinclude scripts/render_wicked_cornell_seed_clip.cpp build-cpu/libvkgsplat.a -o build-cpu/render_wicked_cornell_seed_clip
+c++ -std=c++20 -DVKGSPLAT_ENABLE_METAL=1 -Iinclude scripts/render_wicked_cornell_seed_clip.cpp build-metal/libvkgsplat.a -framework Metal -framework Foundation -o build-metal/render_wicked_cornell_seed_clip
 build-cpu/render_wicked_cornell_seed_clip docs/images/wicked_cornell_seed_clip_cpu third_party/WickedEngine/Content/models/cornellbox.obj cpu
 build-metal/render_wicked_cornell_seed_clip docs/images/wicked_cornell_seed_clip_metal third_party/WickedEngine/Content/models/cornellbox.obj metal
 magick docs/images/wicked_cornell_seed_clip_cpu_000.ppm -filter point -resize 300% docs/images/wicked_cornell_seed_clip_cpu_000.png
@@ -117,7 +117,7 @@ magick -delay 8 -loop 0 docs/images/wicked_cornell_seed_clip_metal_*.ppm -filter
 | --- | --- | --- |
 | `test_camera` | Builds a camera, sets resolution and perspective, applies `look_at`, and verifies the dimensions/FOV plus a nonzero view matrix. | None |
 | `test_denoise` | Runs the SVGF-style M5 denoising baseline. It verifies temporal accumulation from reprojected history, noisy-pixel smoothing, luminance variance tracking, and edge-aware rejection across depth/primitive discontinuities. | In-memory only. |
-| `test_public_headers` | Includes the umbrella `vksplat/vksplat.h` in a CPU-only build and checks basic `Scene`, `Camera`, and tile-grid APIs remain usable without Vulkan/CUDA SDK headers. | None |
+| `test_public_headers` | Includes the umbrella `vkgsplat/vkgsplat.h` in a CPU-only build and checks basic `Scene`, `Camera`, and tile-grid APIs remain usable without Vulkan/CUDA SDK headers. | None |
 | `test_raytrace_seed` | Runs the M6 Vulkan-ray-tracing-shaped CPU seed fixture. It traces two noisy 1-spp triangle-scene frames, verifies hit/miss behavior and RT API-shape flags, derives a camera motion map from NDC depth and camera matrices, reprojects stable hit history, rejects miss history, and feeds the result into the denoiser. | In-memory only. |
 | `test_reprojection` | Runs the two-frame temporal reprojection contract. It derives a current-to-previous screen-space motion map from camera matrices and current NDC depth, reprojects previous-frame color, and checks history rejection for disocclusion, primitive-ID mismatch, and depth mismatch. | In-memory only. |
 | `test_scene` | Smoke-tests the `Scene` container: empty state, resize, size, and name storage. | None |
@@ -128,7 +128,7 @@ magick -delay 8 -loop 0 docs/images/wicked_cornell_seed_clip_metal_*.ppm -filter
 ## Optional Native GPU Tests
 
 These tests compile when the relevant native backend is enabled. On Apple,
-`VKSPLAT_ENABLE_METAL` defaults to `ON`. In sandboxed runners, Metal device
+`VKGSPLAT_ENABLE_METAL` defaults to `ON`. In sandboxed runners, Metal device
 discovery can be hidden; the test returns skip code `77` if no device is visible.
 
 | Test | What it checks | Image output |
@@ -137,7 +137,7 @@ discovery can be hidden; the test returns skip code `77` if no device is visible
 
 ## Optional 3DGS Tests
 
-These tests compile only when `VKSPLAT_ENABLE_3DGS=ON`.
+These tests compile only when `VKGSPLAT_ENABLE_3DGS=ON`.
 
 | Test | What it checks | Image output |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ These tests are compiled only when the relevant SDK/backend is enabled. They ret
 
 | Test | What it checks | Image output |
 | --- | --- | --- |
-| `test_vulkan_m7_offscreen` | Creates a Vulkan instance, finds a physical device with vkSplat mesh-shader requirements, finds a graphics queue, and creates a logical device with mesh shader, buffer device address, and synchronization extensions. The offscreen draw target is still a gate, not a rendered image test. | None |
+| `test_vulkan_m7_offscreen` | Creates a Vulkan instance, finds a physical device with vkGSplat mesh-shader requirements, finds a graphics queue, and creates a logical device with mesh shader, buffer device address, and synchronization extensions. The offscreen draw target is still a gate, not a rendered image test. | None |
 | `test_cuda_tile_renderer` | With CUDA and 3DGS enabled, runs the CUDA tile renderer on a tiny projected-splat fixture, copies pixels back, and checks the center pixel is red-dominant after sorted blending. | In-memory only. |
 
 ## Latest Local Result
@@ -162,12 +162,12 @@ These tests are compiled only when the relevant SDK/backend is enabled. They ret
 The CPU suite passed locally:
 
 ```text
-Default build, VKSPLAT_ENABLE_3DGS=OFF:
+Default build, VKGSPLAT_ENABLE_3DGS=OFF:
 100% tests passed, 0 tests failed out of 9
 
-Metal build, VKSPLAT_ENABLE_METAL=ON:
+Metal build, VKGSPLAT_ENABLE_METAL=ON:
 100% tests passed, 0 tests failed out of 10
 
-Optional 3DGS build, VKSPLAT_ENABLE_3DGS=ON:
+Optional 3DGS build, VKGSPLAT_ENABLE_3DGS=ON:
 100% tests passed, 0 tests failed out of 15
 ```

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// vksplat_viewer — minimal CLI that loads a scene, builds a renderer,
+// vkgsplat_viewer — minimal CLI that loads a scene, builds a renderer,
 // and produces a single headless image. The interactive swapchain path
 // is staged but disabled in v1; the production SDG flow is headless.
 
-#include <vksplat/vksplat.h>
+#include <vkgsplat/vkgsplat.h>
 
 #include <cstdio>
 #include <cstdint>
@@ -85,47 +85,47 @@ int main(int argc, char** argv) {
     const Args args = parse(argc, argv);
 
     if (args.dump_caps) {
-#if defined(VKSPLAT_ENABLE_VULKAN)
-        vksplat::vk::dump_instance_capabilities();
+#if defined(VKGSPLAT_ENABLE_VULKAN)
+        vkgsplat::vk::dump_instance_capabilities();
         return 0;
 #else
-        std::fprintf(stderr, "[vksplat] Vulkan support is not available in this build\n");
+        std::fprintf(stderr, "[vkgsplat] Vulkan support is not available in this build\n");
         return 1;
 #endif
     }
     if (args.scene_path.empty()) usage(argv[0]);
 
-    std::fprintf(stderr, "[vksplat] vksplat_viewer %s\n", vksplat::version_string);
-    std::fprintf(stderr, "[vksplat] loading scene: %s\n", args.scene_path.string().c_str());
-    auto scene = vksplat::Scene::load(args.scene_path);
-    std::fprintf(stderr, "[vksplat] scene loaded: %zu gaussians\n", scene.size());
+    std::fprintf(stderr, "[vkgsplat] vkgsplat_viewer %s\n", vkgsplat::version_string);
+    std::fprintf(stderr, "[vkgsplat] loading scene: %s\n", args.scene_path.string().c_str());
+    auto scene = vkgsplat::Scene::load(args.scene_path);
+    std::fprintf(stderr, "[vkgsplat] scene loaded: %zu gaussians\n", scene.size());
 
-    vksplat::Camera camera;
+    vkgsplat::Camera camera;
     camera.set_resolution(args.width, args.height);
     camera.set_perspective(0.785398f /* 45deg */,
                            static_cast<float>(args.width) / static_cast<float>(args.height),
                            0.1f, 1000.0f);
     camera.look_at({ 0.0f, 0.0f, 3.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
 
-    auto renderer = vksplat::make_renderer(args.backend);
+    auto renderer = vkgsplat::make_renderer(args.backend);
     if (!renderer) {
-        std::fprintf(stderr, "[vksplat] backend '%s' is not available in this build\n",
+        std::fprintf(stderr, "[vkgsplat] backend '%s' is not available in this build\n",
                      args.backend.c_str());
         return 1;
     }
-    std::fprintf(stderr, "[vksplat] backend: %.*s\n",
+    std::fprintf(stderr, "[vkgsplat] backend: %.*s\n",
                  static_cast<int>(renderer->backend_name().size()),
                  renderer->backend_name().data());
     renderer->upload(scene);
 
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(args.width) * args.height * 4);
 
-    vksplat::RenderTarget target;
-    target.kind = vksplat::RenderTargetKind::HOST_BUFFER;
-    target.desc = { args.width, args.height, vksplat::PixelFormat::R8G8B8A8_UNORM, 1, 1 };
+    vkgsplat::RenderTarget target;
+    target.kind = vkgsplat::RenderTargetKind::HOST_BUFFER;
+    target.desc = { args.width, args.height, vkgsplat::PixelFormat::R8G8B8A8_UNORM, 1, 1 };
     target.user_handle = pixels.data();
 
-    vksplat::RenderParams params;
+    vkgsplat::RenderParams params;
     params.deterministic = true;
     params.seed          = 42;
 
@@ -133,18 +133,18 @@ int main(int argc, char** argv) {
     renderer->wait(frame);
 
     if (!write_ppm(args.output_path, args.width, args.height, pixels)) {
-        std::fprintf(stderr, "[vksplat] failed to write output image: %s\n",
+        std::fprintf(stderr, "[vkgsplat] failed to write output image: %s\n",
                      args.output_path.string().c_str());
         return 1;
     }
 
-    std::fprintf(stderr, "[vksplat] frame %llu rendered (%ux%u) -> %s\n",
+    std::fprintf(stderr, "[vkgsplat] frame %llu rendered (%ux%u) -> %s\n",
                  static_cast<unsigned long long>(frame),
                  args.width, args.height,
                  args.output_path.string().c_str());
 
     if (args.present) {
-        std::fprintf(stderr, "[vksplat] --present is not supported in v1 (headless only).\n");
+        std::fprintf(stderr, "[vkgsplat] --present is not supported in v1 (headless only).\n");
     }
     return 0;
 }

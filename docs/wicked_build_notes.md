@@ -1,28 +1,28 @@
 # Wicked Engine Local Build Notes
 
-This records the local build used for vkSplat's first Wicked Engine example.
+This records the local build used for vkGSplat's first Wicked Engine example.
 
 ## Built Target
 
 - Source: `third_party/WickedEngine`
-- Build directory: `third_party/WickedEngine/build-vksplat-example`
-- Targets: `Template_Linux`, `vkSplatCapture`
-- Template output: `third_party/WickedEngine/build-vksplat-example/Samples/Template_Linux/Template_Linux`
-- Capture output: `third_party/WickedEngine/build-vksplat-example/Samples/vkSplatCapture/vkSplatCapture`
+- Build directory: `third_party/WickedEngine/build-vkgsplat-example`
+- Targets: `Template_Linux`, `vkGSplatCapture`
+- Template output: `third_party/WickedEngine/build-vkgsplat-example/Samples/Template_Linux/Template_Linux`
+- Capture output: `third_party/WickedEngine/build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture`
 - Platform used here: macOS / Apple Silicon / AppleClang
 
 ## Configure Command
 
 ```bash
 cmake -S third_party/WickedEngine \
-  -B third_party/WickedEngine/build-vksplat-example \
+  -B third_party/WickedEngine/build-vkgsplat-example \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXE_LINKER_FLAGS=-Wl,-no_fixup_chains \
   -DWICKED_EDITOR=OFF \
   -DWICKED_TESTS=OFF \
   -DWICKED_IMGUI_EXAMPLE=OFF \
   -DWICKED_LINUX_TEMPLATE=ON \
-  -DWICKED_VKSPLAT_CAPTURE=ON \
+  -DWICKED_VKGSPLAT_CAPTURE=ON \
   -DWICKED_ENABLE_SYMLINKS=OFF \
   -DUSE_SSE4_1=OFF \
   -DUSE_SSE4_2=OFF \
@@ -38,8 +38,8 @@ cmake -S third_party/WickedEngine \
 Build command:
 
 ```bash
-cmake --build third_party/WickedEngine/build-vksplat-example --target Template_Linux --parallel 8
-cmake --build third_party/WickedEngine/build-vksplat-example --target vkSplatCapture --parallel 8
+cmake --build third_party/WickedEngine/build-vkgsplat-example --target Template_Linux --parallel 8
+cmake --build third_party/WickedEngine/build-vkgsplat-example --target vkGSplatCapture --parallel 8
 ```
 
 ## Local Patches Needed
@@ -76,7 +76,7 @@ Run from `third_party/WickedEngine/WickedEngine` so Wicked finds `./libdxcompile
 ```bash
 DYLD_LIBRARY_PATH=/opt/homebrew/lib \
 VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json \
-../build-vksplat-example/Samples/Template_Linux/Template_Linux vulkan
+../build-vkgsplat-example/Samples/Template_Linux/Template_Linux vulkan
 ```
 
 Observed smoke-test result on Apple M4:
@@ -88,16 +88,16 @@ Observed smoke-test result on Apple M4:
 - Warm-cache run reaches `wi::renderer Initialized` and `[wi::initializer] Wicked Engine Initialized`.
 - In the Codex desktop/sandbox launch context, the SDL template exits immediately after initialization with status `-1`; no Vulkan instance, descriptor pool, or Metal zero-texture assertion remains.
 
-## vkSplat Capture Harness
+## vkGSplat Capture Harness
 
-`Samples/vkSplatCapture` is a dedicated deterministic harness for vkSplat integration. It creates a small hidden SDL Vulkan window only so Wicked can query the platform Vulkan instance extensions, constructs `wi::graphics::GraphicsDevice_Vulkan` directly, assigns `wi::graphics::GetDevice()`, initializes Wicked, prints adapter/capability facts, and exits without entering the generic SDL template loop.
+`Samples/vkGSplatCapture` is a dedicated deterministic harness for vkGSplat integration. It creates a small hidden SDL Vulkan window only so Wicked can query the platform Vulkan instance extensions, constructs `wi::graphics::GraphicsDevice_Vulkan` directly, assigns `wi::graphics::GetDevice()`, initializes Wicked, prints adapter/capability facts, and exits without entering the generic SDL template loop.
 
 Run from `third_party/WickedEngine/WickedEngine`:
 
 ```bash
 DYLD_LIBRARY_PATH=/opt/homebrew/lib \
 VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json \
-../build-vksplat-example/Samples/vkSplatCapture/vkSplatCapture
+../build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture
 ```
 
 For the Cornell capture-contract probe:
@@ -105,18 +105,18 @@ For the Cornell capture-contract probe:
 ```bash
 DYLD_LIBRARY_PATH=/opt/homebrew/lib \
 VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json \
-../build-vksplat-example/Samples/vkSplatCapture/vkSplatCapture --scene
+../build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture --scene
 ```
 
 Observed result on Apple M4 / MoltenVK 1.4.1:
 
 ```text
-vkSplatCapture: initialized=yes
-vkSplatCapture: adapter=Apple M4
-vkSplatCapture: driver=MoltenVK: 1.4.1
-vkSplatCapture: shader_format=spirv
-vkSplatCapture: capability.mesh_shader=no
-vkSplatCapture: capability.raytracing=no
+vkGSplatCapture: initialized=yes
+vkGSplatCapture: adapter=Apple M4
+vkGSplatCapture: driver=MoltenVK: 1.4.1
+vkGSplatCapture: shader_format=spirv
+vkGSplatCapture: capability.mesh_shader=no
+vkGSplatCapture: capability.raytracing=no
 ```
 
 This verifies that Wicked's Vulkan backend is available and consumes SPIR-V on this machine. It also shows that MoltenVK does not expose the Vulkan mesh shader or Vulkan ray tracing capabilities needed for the eventual hardware-RT/mesh-shader acceptance test, so that test will need either an RTX-class Vulkan backend or a non-RT fallback path for local Apple runs.
@@ -124,22 +124,22 @@ This verifies that Wicked's Vulkan backend is available and consumes SPIR-V on t
 The `--scene` probe currently avoids Wicked's full OBJ import/render-prep path on MoltenVK because that path repeatedly attempts graphics pipeline variants which fail with `VK_ERROR_INITIALIZATION_FAILED` before any ray-tracing capture can happen. Instead, it scans `cornellbox.obj` metadata, configures the intended path-tracing capture contract, and exits deterministically:
 
 ```text
-vkSplatCapture: scene.loaded=yes
-vkSplatCapture: scene.importer=obj-metadata-scan
-vkSplatCapture: scene.path=../Content/models/cornellbox.obj
-vkSplatCapture: scene.meshes=1
-vkSplatCapture: scene.objects=1
-vkSplatCapture: scene.materials=3
-vkSplatCapture: scene.vertices=68
-vkSplatCapture: scene.faces=17
-vkSplatCapture: camera.resolution=256x256
-vkSplatCapture: render_path=RenderPath3D_PathTracing
-vkSplatCapture: capture.surface.color=traceResult
-vkSplatCapture: capture.surface.depth=traceDepth
-vkSplatCapture: capture.surface.primitive_id=rtPrimitiveID
-vkSplatCapture: capture.surface.motion=derived_screen_space_motion
-vkSplatCapture: capture.ready=no
-vkSplatCapture: capture.mode=metadata-only-no-vulkan-raytracing
+vkGSplatCapture: scene.loaded=yes
+vkGSplatCapture: scene.importer=obj-metadata-scan
+vkGSplatCapture: scene.path=../Content/models/cornellbox.obj
+vkGSplatCapture: scene.meshes=1
+vkGSplatCapture: scene.objects=1
+vkGSplatCapture: scene.materials=3
+vkGSplatCapture: scene.vertices=68
+vkGSplatCapture: scene.faces=17
+vkGSplatCapture: camera.resolution=256x256
+vkGSplatCapture: render_path=RenderPath3D_PathTracing
+vkGSplatCapture: capture.surface.color=traceResult
+vkGSplatCapture: capture.surface.depth=traceDepth
+vkGSplatCapture: capture.surface.primitive_id=rtPrimitiveID
+vkGSplatCapture: capture.surface.motion=derived_screen_space_motion
+vkGSplatCapture: capture.ready=no
+vkGSplatCapture: capture.mode=metadata-only-no-vulkan-raytracing
 ```
 
 ## Next Step

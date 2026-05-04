@@ -2,13 +2,13 @@
 //
 // VkInstance creation. v1 uses the system Vulkan loader and discovers
 // physical devices via vkEnumeratePhysicalDevices. The position paper
-// (Section 4) outlines a path where vkSplat itself ships as the ICD;
-// that codepath is staged behind VKSPLAT_BUILD_ICD and is not enabled
+// (Section 4) outlines a path where vkGSplat itself ships as the ICD;
+// that codepath is staged behind VKGSPLAT_BUILD_ICD and is not enabled
 // in v1.
 
-#include "vksplat/vulkan/instance.h"
+#include "vkgsplat/vulkan/instance.h"
 
-#include "vksplat/version.h"
+#include "vkgsplat/version.h"
 
 #include <cstdio>
 #include <cstring>
@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace vksplat::vk {
+namespace vkgsplat::vk {
 
 namespace {
 
@@ -31,7 +31,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_messenger_callback(
     else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) level = "warn";
     else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) level = "verbose";
 
-    std::fprintf(stderr, "[vksplat][vk-%s] %s\n", level, data->pMessage);
+    std::fprintf(stderr, "[vkgsplat][vk-%s] %s\n", level, data->pMessage);
     return VK_FALSE;
 }
 
@@ -49,7 +49,7 @@ void dump_instance_capabilities() {
     vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
     std::vector<VkExtensionProperties> exts(ext_count);
     vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, exts.data());
-    std::fprintf(stderr, "[vksplat] %u instance extensions:\n", ext_count);
+    std::fprintf(stderr, "[vkgsplat] %u instance extensions:\n", ext_count);
     for (const auto& e : exts) {
         std::fprintf(stderr, "  %s (rev %u)\n", e.extensionName, e.specVersion);
     }
@@ -58,7 +58,7 @@ void dump_instance_capabilities() {
     vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
     std::vector<VkLayerProperties> layers(layer_count);
     vkEnumerateInstanceLayerProperties(&layer_count, layers.data());
-    std::fprintf(stderr, "[vksplat] %u instance layers:\n", layer_count);
+    std::fprintf(stderr, "[vkgsplat] %u instance layers:\n", layer_count);
     for (const auto& l : layers) {
         std::fprintf(stderr, "  %s -- %s\n", l.layerName, l.description);
     }
@@ -69,10 +69,10 @@ Instance Instance::create(const InstanceCreateInfo& info) {
     app.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName   = info.app_name.c_str();
     app.applicationVersion = info.app_version;
-    app.pEngineName        = "vkSplat";
-    app.engineVersion      = VK_MAKE_VERSION(VKSPLAT_VERSION_MAJOR,
-                                             VKSPLAT_VERSION_MINOR,
-                                             VKSPLAT_VERSION_PATCH);
+    app.pEngineName        = "vkGSplat";
+    app.engineVersion      = VK_MAKE_VERSION(VKGSPLAT_VERSION_MAJOR,
+                                             VKGSPLAT_VERSION_MINOR,
+                                             VKGSPLAT_VERSION_PATCH);
     app.apiVersion         = VK_API_VERSION_1_3;
 
     std::vector<const char*> extensions = info.additional_extensions;
@@ -154,4 +154,4 @@ Instance& Instance::operator=(Instance&& o) noexcept {
     return *this;
 }
 
-} // namespace vksplat::vk
+} // namespace vkgsplat::vk

@@ -2,13 +2,13 @@
 //
 // ABI sanity checks for the shared CPU/Vulkan/CUDA 3DGS pipeline records.
 
-#include <vksplat/gpu_pipeline.h>
+#include <vkgsplat/gpu_pipeline.h>
 
 #include <cstdio>
 #include <type_traits>
 
 int main() {
-    using namespace vksplat;
+    using namespace vkgsplat;
 
     static_assert(std::is_trivially_copyable_v<GpuGaussian>);
     static_assert(std::is_trivially_copyable_v<GpuProjectedSplat>);
