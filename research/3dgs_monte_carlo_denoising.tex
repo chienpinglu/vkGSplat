@@ -1,0 +1,603 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+
+\title{Can 3D Gaussian Splatting Help Monte Carlo Denoising?}
+\author{vkGSplat research note}
+\date{Started May 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Executive Thesis}
+
+As of May 4, 2026, the most defensible answer is:
+
+\begin{quote}
+3D Gaussian Splatting is probably not a strong replacement for a conventional
+single-frame Monte Carlo image denoiser, but it is a credible and timely
+representation for \emph{world-space or path-space radiance caching},
+\emph{sample reconstruction}, and \emph{variance reduction}. The closest
+published evidence is GSCache, which adapts 3D Gaussian splatting into an
+online multi-level path-space radiance cache for volume path tracing.
+\end{quote}
+
+For vkGSplat, this means the research direction is worth pursuing, but the
+right formulation is not ``render a noisy image, train 3DGS, render a clean
+image.'' The stronger formulation is:
+\[
+  \begin{aligned}
+  &\text{low-spp path samples}
+  \rightarrow
+  \text{world/path-space Gaussian cache}
+  \\
+  &\rightarrow
+  \text{lower-variance indirect radiance estimate}
+  \rightarrow
+  \text{existing temporal/SVGF-style reconstruction}.
+  \end{aligned}
+\]
+
+My current subjective likelihoods:
+
+\begin{itemize}
+  \item Useful internal vkGSplat experiment: \textbf{high}, about 0.75.
+  \item Publishable prototype for static or slowly changing scenes: \textbf{medium-high}, about 0.6.
+  \item General drop-in denoiser for arbitrary path-traced frames: \textbf{medium-low}, about 0.35.
+  \item Unbiased estimator with clean theory and real-time performance: \textbf{low-medium}, about 0.25 unless framed as a control variate with careful correction.
+\end{itemize}
+
+\section{Why This Is Subtle}
+
+Monte Carlo denoising is usually an image/sample reconstruction problem:
+given noisy estimates of pixel radiance plus auxiliary buffers such as depth,
+normal, albedo, motion, variance, primitive ID, and per-sample features, recover
+a low-error image. 3DGS is instead a scene/radiance-field representation:
+it stores a set of anisotropic kernels in 3D, projects them, and blends them.
+That mismatch is the main risk.
+
+The opportunity is that Monte Carlo path samples are naturally not just pixels.
+They contain hit positions, directions, throughput, PDFs, BSDF information,
+visibility events, primitive identity, and path depth. If we preserve those
+sample records, a Gaussian representation can accumulate radiance in the space
+where the signal is smoother than it is in screen space.
+
+\section{Relevant Research Landscape}
+
+\subsection{Classical and Neural Monte Carlo Denoising}
+
+SVGF is the relevant real-time baseline: it temporally accumulates one-path-per
+pixel input and drives a hierarchical image-space filter with luminance variance
+\cite{schied2017svgf}. vkGSplat already has a CPU SVGF-style baseline in
+\path{include/vkgsplat/denoise.h} and \path{src/core/denoise.cpp}, which makes
+this the natural control.
+
+KPCN showed that learned kernel prediction can denoise production Monte Carlo
+frames using feature buffers \cite{bako2017kpcn}. Kernel-Splatting Networks
+went one level deeper and learned directly from individual Monte Carlo samples,
+not only per-pixel summaries \cite{gharbi2019ksn}. This matters because a 3DGS
+cache should probably be fed by individual path samples, not by already averaged
+pixels.
+
+Neural Control Variates and Neural Radiance Caching are close conceptual
+ancestors. Neural Control Variates use learned approximations for variance
+reduction in Monte Carlo integration \cite{muller2020ncv}. Neural Radiance
+Caching trains a cache online while rendering and uses it for path-traced
+global illumination with little overhead \cite{muller2021nrc}. A Gaussian cache
+can be read as a more explicit, splattable, geometry-aware cousin of NRC.
+
+\subsection{3DGS Meets Monte Carlo}
+
+The original 3DGS paper introduced explicit anisotropic Gaussian primitives
+with fast visibility-aware rendering for real-time radiance-field view synthesis
+\cite{kerbl2023gs}. That work is not Monte Carlo denoising, but it established
+the representation and rendering performance that make this idea attractive.
+
+3D Gaussian Splatting as Markov Chain Monte Carlo reinterprets the set of
+Gaussians as MCMC samples from an underlying scene distribution and relates
+updates to stochastic gradient Langevin dynamics \cite{kheradmand2024mcmc}.
+This is relevant philosophically: it says Gaussian placement/densification can
+be probabilistic rather than just heuristic. It does not solve MC rendering
+denoising directly.
+
+StochasticSplats introduces an unbiased Monte Carlo estimator for the volume
+rendering equation in 3DGS, avoiding depth sorting and allowing a sample count
+quality/cost tradeoff \cite{kheradmand2025stochasticsplats}. This is important
+because it puts MC estimators inside the 3DGS renderer itself. Again, it is not
+a path-tracing denoiser, but it weakens the mental boundary between splatting
+and sampling.
+
+Unified Gaussian Primitives for Scene Representation and Rendering builds
+Gaussian primitives suitable for Monte Carlo path tracing under arbitrary
+illumination \cite{zhou2024unified}. It gives Gaussians transmittance and phase
+function semantics, then path traces them. This is close to the representation
+side of our problem: if Gaussians can be light-transport primitives, they can
+also plausibly be light-transport caches.
+
+\subsection{Closest Hit: GSCache}
+
+GSCache is the clearest evidence that this direction is real. Bauer, Wu,
+Gadirov, and Ma adapt 3D Gaussian splatting into a multi-level path-space
+radiance cache for volume path tracing \cite{bauer2026gscache}. The University
+of Groningen portal describes the cache as trainable on the fly and dynamically
+adaptable to lighting and transfer-function changes. The abstract specifically
+targets slow rendering and high pixel variance caused by Monte Carlo
+integration, and reports less noisy, higher-quality images without increasing
+rendering cost.
+
+Important caveat: GSCache is for path-traced volume rendering in scientific
+visualization. vkGSplat currently cares about low-sample ray-tracing seeds,
+surface scenes, robotics synthetic data, and compute-first Vulkan lowering.
+The result is directly encouraging but not directly transferable.
+
+The deeper design lesson is more specific than ``use Gaussians as a cache.''
+GSCache organizes the cache as multiple path-length levels: each level stores
+attenuated radiance for paths of a given length or subspace of path space. It
+rasterizes cache images before the path tracing pass, then updates the Gaussian
+cache from noisy samples produced by the path tracer. The attractive integration
+claim is that the renderer need only expose attenuated radiance and path length,
+rather than a full neural-training feature stack. For vkGSplat, this suggests a
+surface-scene variant with explicit levels for direct hit, first indirect bounce,
+second indirect bounce, and residual long-tail illumination.
+
+\subsection{3DGS Denoising That Is Not MC Denoising}
+
+Recent papers use 3DGS for denoising captured multi-view or burst images.
+DenoiseGS uses a Gaussian reconstruction model for burst image denoising
+\cite{cheng2025denoisegs}. DenoiseSplat studies noisy multi-view scene
+reconstruction with feed-forward Gaussian splatting \cite{jiang2026denoisesplat}.
+Denoise-GS combines self-supervised image denoising with sparse-view 3DGS
+optimization \cite{xu2026denoisegs}.
+
+These are useful adjacent signals: they show Gaussians can impose multi-view
+consistency and suppress sensor/image noise. But their noise model is not the
+same as Monte Carlo path-tracing variance. We should cite them as adjacent,
+not as proof.
+
+\section{Core Feasibility Argument}
+
+\subsection{What 3DGS Gives Us}
+
+3DGS provides:
+
+\begin{itemize}
+  \item local anisotropic kernels in world space,
+  \item fast projection/splatting into image space,
+  \item differentiable or incremental optimization paths,
+  \item natural support for multi-view consistency,
+  \item a compact explicit cache that is more inspectable than an MLP,
+  \item a structure that maps well onto CUDA/tensor-rich compute.
+\end{itemize}
+
+These are exactly the properties wanted by a renderer that accumulates
+many low-spp seed frames across nearby camera poses. For robotics SDG, the
+scene distribution is controlled, camera motion can be logged exactly, and
+perfect G-buffers are available. This makes a world-space cache much less scary
+than it would be in a game engine with arbitrary dynamic content.
+
+\subsection{Where It Can Fail}
+
+The hardest parts are visibility, high-frequency transport, and bias.
+Indirect radiance is not only a smooth function of position. It can change
+sharply with normal, outgoing direction, roughness, occlusion, light visibility,
+medium state, and path depth. A naive spatial Gaussian cache will leak light
+across walls, smear glossy caustics, lag behind moving lights, and double-count
+transport unless the estimator is carefully designed.
+
+\section{Promising Formulations}
+
+\subsection{Formulation A: World-Space Gaussian Radiance Cache}
+
+This is the main bet.
+
+Borrow the level idea from GSCache, but reinterpret it for surfaces:
+
+\begin{itemize}
+  \item level 0: primary-hit surface attributes and directly visible radiance,
+  \item level 1: first-bounce indirect diffuse or rough radiance,
+  \item level 2: second-bounce and longer low-frequency residual,
+  \item level R: optional residual/control-variate correction samples.
+\end{itemize}
+
+This prevents the cache from averaging path contributions with very different
+variance and spatial smoothness. It also gives vkGSplat a knob: start with
+level 1 only, then add deeper levels if the first experiment works.
+
+For each path sample, record:
+\[
+  s_i = (x_i, n_i, \omega_o, \omega_i, L_i, \beta_i, p_i,
+        \text{depth}_i, \text{primitive}_i, \sigma_i^2)
+\]
+where $x$ is hit position, $n$ is normal, $\omega_o$ is outgoing/view direction,
+$\omega_i$ is sampled incident direction, $L_i$ is radiance or contribution,
+$\beta_i$ is throughput, $p_i$ is the sampling PDF, and $\sigma_i^2$ is a local
+variance estimate.
+
+Maintain Gaussian cache entries:
+\[
+  G_j =
+  (\mu_j, \Sigma_j, \bar{n}_j, a_j, c_j(\omega), v_j, m_j,
+   \text{primitive tags})
+\]
+where $\mu_j$ and $\Sigma_j$ define the spatial kernel, $a_j$ is opacity or
+confidence, $c_j(\omega)$ stores directional radiance, $v_j$ stores variance,
+and $m_j$ stores sample count or effective mass.
+
+At a shading point, query nearby Gaussians with a gated kernel:
+\[
+  w_j(x,n,\omega) =
+  \exp\left(-\frac{1}{2}(x-\mu_j)^T\Sigma_j^{-1}(x-\mu_j)\right)
+  \cdot g_n(n,\bar{n}_j)
+  \cdot g_\omega(\omega)
+  \cdot g_{\text{vis}}.
+\]
+The cache estimate is:
+\[
+  \hat{L}_{cache}(x,\omega) =
+  \frac{\sum_j w_j c_j(\omega)}
+       {\sum_j w_j + \epsilon}.
+\]
+
+Use this cache for second and later bounces, or as an indirect diffuse estimate,
+while direct lighting remains sampled normally. This follows the NRC/GSCache
+spirit and is likely the best first experiment.
+
+\subsection{Formulation B: 3D Sample-Splatting Denoiser}
+
+Instead of using Gaussians as scene primitives, treat each path sample or small
+cluster of path samples as a temporary Gaussian in world space. Reproject/splat
+those sample Gaussians into the current camera and nearby frames. This is the
+3D analog of sample-based kernel splatting.
+
+Advantages:
+
+\begin{itemize}
+  \item easier to prototype than a persistent learned cache,
+  \item naturally uses path-sample data,
+  \item can be compared directly to SVGF and KSN-like thinking,
+  \item less likely to overfit long-term stale lighting.
+\end{itemize}
+
+Disadvantages:
+
+\begin{itemize}
+  \item may become just an expensive bilateral filter in disguise,
+  \item memory bandwidth could dominate,
+  \item without persistent learning it may not beat temporal accumulation.
+\end{itemize}
+
+\subsection{Formulation C: Gaussian Control Variate}
+
+For a Monte Carlo integral
+\[
+  I = \int f(x)\,dx,
+\]
+if we can learn an approximation $g_\theta(x)$ whose integral is known or
+cheaply estimated, then:
+\[
+  I =
+  \int g_\theta(x)\,dx
+  + \int (f(x)-g_\theta(x))\,dx.
+\]
+A corrected estimator is:
+\[
+  \hat{I} =
+  G_\theta
+  + \frac{1}{N}\sum_{i=1}^N
+    \frac{f(x_i)-g_\theta(x_i)}{p(x_i)}.
+\]
+
+This is the cleanest route to unbiasedness. The issue is that a 3DGS radiance
+cache will rarely have an analytic integral over the full path domain. A
+practical compromise is to use the Gaussian cache as a biased high-order bounce
+approximation and occasionally estimate/correct residuals. For vkGSplat's SDG
+target, controlled bias may be acceptable if downstream task accuracy improves
+and high-spp reference error is measured.
+
+\subsection{Formulation D: Gaussian Path Guiding}
+
+This is not denoising, but it may be more theoretically natural. Use Gaussians
+to model spatial-directional incident radiance distributions, then sample
+directions from the cache. This reduces variance before denoising. The path
+guiding literature already uses mixture models and neural models; Gaussians are
+a plausible explicit representation, especially if tied to primitive IDs and
+surface tangent frames.
+
+\section{Concrete vkGSplat Experiment Plan}
+
+\subsection{Stage 0: Strengthen the Baseline}
+
+Use the existing ray-tracing seed path plus current SVGF-style denoiser as the
+baseline. Produce a fixed benchmark matrix:
+
+\begin{itemize}
+  \item scenes: Cornell box, Sponza/Bistro-like asset if available, synthetic
+        robotics clutter scene,
+  \item sample counts: 1, 2, 4, 8 spp,
+  \item references: 512 or 1024 spp offline reference,
+  \item metrics: MSE, relMSE, SSIM, FLIP if easy, temporal error, ghosting,
+  \item costs: frame time, memory, update time, query time.
+\end{itemize}
+
+\subsection{Stage 1: Path Sample Logging}
+
+Add an optional debug path-sample stream. Keep it CPU-first if necessary:
+
+\begin{verbatim}
+struct PathSampleRecord {
+    float3 hit_position;
+    float3 normal;
+    float3 wo;
+    float3 wi;
+    float3 contribution;
+    float3 throughput;
+    float3 attenuated_radiance;
+    float pdf;
+    float roughness;
+    uint32_t primitive_id;
+    uint32_t path_depth;
+    uint32_t sample_index;
+    uint32_t pixel_x;
+    uint32_t pixel_y;
+};
+\end{verbatim}
+
+This is the critical enabling step. Without per-sample records, 3DGS can only
+operate on pixels and loses most of its advantage.
+
+For the first prototype, \texttt{attenuated\_radiance} and
+\texttt{path\_depth} are the minimum GSCache-like fields. The other fields make
+the cache safer for surfaces: normal, primitive ID, roughness, and direction
+enable gating so radiance does not smear across unrelated transport events.
+
+\subsection{Stage 2: CPU Gaussian Cache Prototype}
+
+Implement a non-renderer intrusive prototype:
+
+\begin{itemize}
+  \item hash hit positions into a 3D grid,
+  \item create/update one or more Gaussians per cell,
+  \item align covariance to surface tangent/normal frame,
+  \item store low-order spherical harmonics for directional radiance,
+  \item store primitive ID histogram or dominant primitive ID,
+  \item query cache for indirect radiance after first bounce,
+  \item compare against path-traced reference and existing SVGF output.
+\end{itemize}
+
+The first version can be intentionally crude. The research question is whether
+world-space cache reuse beats image-space history at equal cost.
+
+A minimal host-side API could look like:
+
+\begin{verbatim}
+struct GaussianRadianceCacheOptions {
+    float cell_size;
+    float normal_reject_cosine;
+    float roughness_bucket_width;
+    uint32_t max_path_depth;
+    uint32_t max_gaussians_per_cell;
+};
+
+struct GaussianRadianceQuery {
+    float3 position;
+    float3 normal;
+    float3 wo;
+    float roughness;
+    uint32_t primitive_id;
+    uint32_t path_depth;
+};
+
+class GaussianRadianceCache {
+public:
+    void reset(uint32_t width, uint32_t height);
+    void update(span<const PathSampleRecord> samples);
+    float3 query_indirect(const GaussianRadianceQuery& query) const;
+    DenoiseFrame make_feature_frame(const ReprojectionFrame& current) const;
+};
+\end{verbatim}
+
+The point of this API is to keep the experiment outside the core renderer until
+there is evidence. It can consume path logs, produce feature frames, and plug
+into the existing reprojection/denoise tests without committing vkGSplat to a
+new backend architecture.
+
+\subsection{Stage 3: Hybrid SVGF + Gaussian Cache}
+
+Do not replace SVGF immediately. Feed the Gaussian cache output into the current
+denoising pipeline as:
+
+\begin{itemize}
+  \item an auxiliary feature buffer,
+  \item an indirect radiance prior,
+  \item a variance estimate,
+  \item a history validation signal.
+\end{itemize}
+
+This is likely to produce cleaner wins than a monolithic new denoiser.
+
+\subsection{Stage 4: CUDA/Compute Path}
+
+If Stage 2/3 shows signal, move to CUDA:
+
+\begin{itemize}
+  \item bin samples into tiles or hashed cells,
+  \item update Gaussian moments with atomics or segmented reductions,
+  \item compact/prune low-confidence Gaussians,
+  \item query in a fixed neighborhood for predictable latency,
+  \item expose cache output as a standard vkGSplat denoise input buffer.
+\end{itemize}
+
+\section{Possible Paper Angle}
+
+A plausible paper title:
+
+\begin{quote}
+\emph{Gaussian Path-Space Caches for Compute-First Monte Carlo Reconstruction}
+\end{quote}
+
+The thesis would be:
+
+\begin{quote}
+For synthetic data generation, where scenes are controlled, camera/state
+metadata is exact, and downstream model utility matters more than perfect
+human-display latency, explicit Gaussian path-space caches provide a practical
+middle ground between screen-space denoisers and neural radiance caches.
+\end{quote}
+
+This would fit vkGSplat well because the project is already about moving
+rendering and reconstruction onto tensor-rich compute rather than defending
+fixed-function graphics hardware.
+
+\section{Evaluation Questions}
+
+\begin{enumerate}
+  \item Does a Gaussian cache reduce error at fixed samples per pixel compared
+        with the current SVGF baseline?
+  \item Does it reduce temporal instability under camera motion?
+  \item Does it leak light across thin occluders or primitive boundaries?
+  \item Does primitive-ID gating prevent most of the leaks?
+  \item How stale does the cache become under moving lights or moving objects?
+  \item Can low-order SH represent directional glossy transport well enough?
+  \item Is the method still useful if only applied to diffuse/rough indirect
+        lighting?
+  \item Does it help downstream robotics perception metrics even when image
+        metrics show small bias?
+\end{enumerate}
+
+\section{Current Recommendation}
+
+Proceed, but with a narrow first target:
+
+\begin{quote}
+Build a Gaussian radiance cache for diffuse/rough indirect illumination in
+static scenes, trained from path samples and evaluated against the existing
+SVGF baseline. Treat it as a biased variance-reduction cache first. Only chase
+unbiased control-variate theory after the practical signal is visible.
+\end{quote}
+
+The highest-value immediate engineering task is not a renderer rewrite. It is
+path-sample logging plus a CPU cache prototype that can be run against existing
+low-spp and high-spp test scenes.
+
+\section{Overnight Research TODO}
+
+\begin{itemize}
+  \item Read the full GSCache paper after embargo/access allows, especially its
+        cache hierarchy, update rules, and comparison to NRC.
+  \item Check whether any 2026 arXiv papers cite GSCache or combine 3DGS with
+        path guiding/control variates.
+  \item Search for Gaussian mixture path guiding papers that can inform the
+        directional component of the cache.
+  \item Look for open-source implementations of StochasticSplats, 3DGS-MCMC,
+        and DenoiseGS to borrow data structures or update heuristics.
+  \item Sketch an interface for \path{GaussianRadianceCache} that does not
+        disturb the current denoise API until evidence is stronger.
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{kerbl2023gs}
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis.
+\newblock 3D Gaussian Splatting for Real-Time Radiance Field Rendering.
+\newblock ACM Transactions on Graphics, 42(4), 2023.
+\newblock \url{https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/}
+
+\bibitem{kheradmand2024mcmc}
+Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng,
+Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi.
+\newblock 3D Gaussian Splatting as Markov Chain Monte Carlo.
+\newblock NeurIPS 2024; arXiv:2404.09591.
+\newblock \url{https://arxiv.org/abs/2404.09591}
+
+\bibitem{kheradmand2025stochasticsplats}
+Shakiba Kheradmand, Delio Vicini, George Kopanas, Dmitry Lagun,
+Kwang Moo Yi, Mark Matthews, and Andrea Tagliasacchi.
+\newblock StochasticSplats: Stochastic Rasterization for Sorting-Free 3D
+Gaussian Splatting.
+\newblock arXiv:2503.24366, 2025.
+\newblock \url{https://arxiv.org/abs/2503.24366}
+
+\bibitem{zhou2024unified}
+Yang Zhou, Songyin Wu, and Ling-Qi Yan.
+\newblock Unified Gaussian Primitives for Scene Representation and Rendering.
+\newblock arXiv:2406.09733, 2024.
+\newblock \url{https://mangosister.github.io/gsr_site/}
+
+\bibitem{bauer2026gscache}
+David Bauer, Qi Wu, Hamid Gadirov, and Kwan Liu Ma.
+\newblock GSCache: Real-Time Radiance Caching for Volume Path Tracing Using
+3D Gaussian Splatting.
+\newblock IEEE Transactions on Visualization and Computer Graphics,
+32(1):901--911, 2026.
+\newblock \url{https://research.rug.nl/en/publications/gscache-real-time-radiance-caching-for-volume-path-tracing-using-/}
+
+\bibitem{schied2017svgf}
+Christoph Schied, Anton Kaplanyan, Chris Wyman, Anjul Patney,
+Chakravarty R. Alla Chaitanya, John Burgess, Shiqiu Liu, Carsten Dachsbacher,
+Aaron Lefohn, and Marco Salvi.
+\newblock Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction
+for Path-Traced Global Illumination.
+\newblock High Performance Graphics, 2017.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/schied2017spatiotemporal/}
+
+\bibitem{bako2017kpcn}
+Steve Bako, Thijs Vogels, Brian McWilliams, Mark Meyer, Jan Novak,
+Alex Harvill, Pradeep Sen, Tony DeRose, and Fabrice Rousselle.
+\newblock Kernel-Predicting Convolutional Networks for Denoising Monte Carlo
+Renderings.
+\newblock ACM Transactions on Graphics, 36(4), 2017.
+\newblock \url{https://civc.ucsb.edu/graphics/Papers/SIGGRAPH2017_KPCN/}
+
+\bibitem{gharbi2019ksn}
+Michael Gharbi, Tzu-Mao Li, Miika Aittala, Jaakko Lehtinen, and Fredo Durand.
+\newblock Sample-Based Monte Carlo Denoising Using a Kernel-Splatting Network.
+\newblock ACM Transactions on Graphics, 38(4), 2019.
+\newblock \url{https://research.aalto.fi/en/publications/sample-based-monte-carlo-denoising-using-a-kernel-splatting-netwo}
+
+\bibitem{muller2020ncv}
+Thomas Mueller, Fabrice Rousselle, Alexander Keller, and Jan Novak.
+\newblock Neural Control Variates.
+\newblock ACM Transactions on Graphics, SIGGRAPH Asia, 2020.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/muller2020ncv/}
+
+\bibitem{muller2021nrc}
+Thomas Mueller, Fabrice Rousselle, Jan Novak, and Alexander Keller.
+\newblock Real-Time Neural Radiance Caching for Path Tracing.
+\newblock ACM Transactions on Graphics, SIGGRAPH, 2021.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/muller2021nrc/}
+
+\bibitem{hasselgren2022mcd}
+Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg.
+\newblock Shape, Light, and Material Decomposition from Images Using Monte
+Carlo Rendering and Denoising.
+\newblock NeurIPS, 2022.
+\newblock \url{https://research.nvidia.com/publication/2022-10_shape-light-and-material-decomposition-images-using-monte-carlo-rendering-and}
+
+\bibitem{cheng2025denoisegs}
+Yongsen Cheng, Yuanhao Cai, and Yulun Zhang.
+\newblock DenoiseGS: Gaussian Reconstruction Model for Burst Denoising.
+\newblock arXiv:2511.22939, 2025.
+\newblock \url{https://arxiv.org/abs/2511.22939}
+
+\bibitem{jiang2026denoisesplat}
+Fuzhen Jiang, Zhuoran Li, and Yinlin Zhang.
+\newblock DenoiseSplat: Feed-Forward Gaussian Splatting for Noisy 3D Scene
+Reconstruction.
+\newblock arXiv:2603.09291, 2026.
+\newblock \url{https://arxiv.org/abs/2603.09291}
+
+\bibitem{xu2026denoisegs}
+Yabo Xu, Jin Ding, Jianbin Zhang, Ping Tan, and Mingrui Li.
+\newblock Denoise-GS: Self-Supervised Denoising for Sparse-View 3D Gaussian
+Splatting.
+\newblock Sensors, 26(2):651, 2026.
+\newblock \url{https://www.mdpi.com/1424-8220/26/2/651}
+
+\end{thebibliography}
+
+\end{document}

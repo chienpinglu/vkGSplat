@@ -14,7 +14,7 @@ can be diffed pixel-for-pixel.
 
 ## Why this exists
 
-The position paper at `../paper/vkGSplat.tex` argues that a Vulkan-style
+The position paper at `../papers/vkGSplat.tex` argues that a Vulkan-style
 graphics API can be implemented as a software renderer expressed in
 compute kernels — i.e., that the API surface and the silicon should be
 decoupled. `vulkan/` is a 200-line proof of that idea on a problem

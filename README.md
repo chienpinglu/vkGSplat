@@ -12,8 +12,8 @@ or RT cores. The target workload is **synthetic data generation for
 robotics** — throughput-bound, latency-tolerant, consumed by a learned model
 rather than a human eye.
 
-The position the project defends is laid out in `paper/vkGSplat.tex` and
-summarized in `paper/PROPOSAL.md`. **Read those first.** The short version:
+The position the project defends is laid out in `papers/vkGSplat.tex` and
+summarized in `papers/PROPOSAL.md`. **Read those first.** The short version:
 DLSS-style rendering has already moved most of the real-time pipeline off
 fixed-function graphics units onto tensor cores. vkGSplat is the architectural
 endpoint of that trajectory — a renderer where seed *and* reconstruction both
@@ -42,7 +42,7 @@ longer part of the default milestone gate.
 
 ```
 vkGSplat/
-├── paper/                  Position paper (LaTeX) and one-page proposal — START HERE
+├── papers/                  Position paper (LaTeX) and one-page proposal — START HERE
 ├── include/vkgsplat/        Public headers
 ├── src/
 │   ├── core/               Scene, camera, IO, math
@@ -62,7 +62,7 @@ A `tinyrender/` scratch sandbox lives next to this repo for prototype spikes.
 
 ## Roadmap
 
-1. **Paper.** Land the position argument (`paper/vkGSplat.tex`) and circulate.
+1. **Paper.** Land the position argument (`papers/vkGSplat.tex`) and circulate.
 2. **Vulkan capture contract.** Capture SPIR-V, frame resources, camera state,
    depth, primitive identity, and adjacent-frame metadata from real Vulkan
    programs.

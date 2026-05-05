@@ -7,7 +7,7 @@ them locally with the recipes below.
 ## Recommended starter scenes
 
 The following are the standard novel-view-synthesis benchmarks the
-position paper (`paper/vkGSplat.tex`, Section "Evaluation plan") commits to
+position paper (`papers/vkGSplat.tex`, Section "Evaluation plan") commits to
 reporting against.
 
 ### Mip-NeRF 360 — `garden`, `bicycle`, `bonsai`

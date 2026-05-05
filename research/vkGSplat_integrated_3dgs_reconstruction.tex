@@ -1,0 +1,3561 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+
+\title{vkGSplat: Is 3D Gaussian Splatting a Good Integration Layer for DLSS-Class Reconstruction?}
+\author{vkGSplat research note}
+\date{Started May 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Executive Thesis}
+
+The answer is \textbf{qualified yes}. 3D Gaussian Splatting is a promising way
+to integrate Monte Carlo denoising, radiance caching, temporal anti-aliasing,
+temporal super-resolution, supersampling, frame interpolation, and learned
+reconstruction, but only if vkGSplat treats 3DGS as a \emph{shared persistent
+reconstruction state}, not as a standalone renderer or a bag of unrelated
+tricks.
+
+The central claim to test is:
+
+\begin{quote}
+A single explicit 3D/4D Gaussian state can carry geometry, visibility, motion,
+radiance, subpixel coverage, variance, and confidence across frames. If that
+state can feed multiple reconstruction tasks with less ghosting, less shimmer,
+and lower variance than separate image-space systems, then 3DGS is a good
+integration layer for vkGSplat.
+\end{quote}
+
+The software-stack consequence is important: 3DGS is \emph{not} the whole
+renderer, and DLSS-style reconstruction is \emph{not} the acquisition stage.
+vkGSplat should keep software renderers as replaceable acquisition producers.
+A CPU ray tracer, an Apple Metal backend, a future CUDA software ray tracer, a
+\textsc{nvdiffrast}-style CUDA triangle rasterizer, and a GraphDECO/\textsc{gsplat}
+Gaussian rasterizer should all be allowed to produce the same seed-buffer
+contract. The 3DGS/DLSS-class research layer begins after that boundary: it
+consumes color, depth, primitive identity, motion, variance, and auxiliary
+signals, then performs history, denoising, super-resolution, frame generation,
+and optional neural residual reconstruction.
+
+The core framework therefore does \emph{not} require massive training. The
+initial stack is analytic and systems-oriented: software acquisition, seed
+buffer extraction, reprojection, depth/identity rejection, SVGF-style
+denoising, temporal accumulation, Gaussian state updates, and CUDA tile
+scheduling. Training appears only as an optional later residual model. The
+research bet is that explicit geometry, motion, variance, identity, and
+confidence should reduce what a neural model must learn, not force vkGSplat to
+replicate a proprietary DLSS-scale training pipeline.
+
+This does \emph{not} mean vkGSplat can directly clone DLSS 4.5 or the
+announced DLSS 5 target. NVIDIA's DLSS 4.5 combines a second-generation
+transformer Super Resolution model, Dynamic Multi Frame Generation, 6X Multi
+Frame Generation, Reflex, mature engine integration, optical flow, training
+data, and heavy production tuning \cite{nvidia2026dlss45,nvidia2026dlssdeveloper}.
+NVIDIA has also announced DLSS 5 as a real-time neural rendering system that
+uses game color and motion-vector inputs to synthesize photoreal lighting and
+material detail while remaining anchored to the game scene \cite{nvidia2026dlss5}.
+vkGSplat's stronger research position is different:
+
+\begin{quote}
+DLSS reconstructs from images plus engine buffers. vkGSplat can reconstruct from
+images plus explicit Gaussian scene, motion, and radiance state.
+\end{quote}
+
+\section{Training Requirement}
+
+vkGSplat should be evaluated in three increasingly expensive modes:
+
+\begin{enumerate}
+  \item \textbf{No-training core.} The required baseline is deterministic:
+        seed acquisition, motion-map derivation, history rejection, temporal
+        accumulation, denoising, Gaussian update, and Gaussian projection are
+        implemented as explicit CPU/Metal/CUDA kernels. This mode must produce
+        useful results before any neural model is introduced.
+  \item \textbf{Small calibrated residual.} If the analytic path exposes stable
+        Gaussian feature planes, a compact residual network may learn bounded
+        corrections for high-frequency shading, specular residuals, or
+        difficult disocclusions. This model is optional and should be tested
+        against an equal-size image-only model.
+  \item \textbf{DLSS-class product model.} A large model trained across many
+        games/scenes is out of scope for the core framework. It belongs only to
+        a future productization path, not to the proof that the software stack
+        and Gaussian state are useful.
+\end{enumerate}
+
+This distinction is central. A failure to match DLSS product quality does not
+falsify vkGSplat. The falsifiable core question is whether explicit
+acquisition-independent Gaussian state improves reconstruction quality,
+stability, or cost before large-scale training enters the loop.
+
+\section{What ``Good Integration Layer'' Means}
+
+3DGS is useful here only if it satisfies four criteria:
+
+\begin{enumerate}
+  \item \textbf{Shared state:} the same Gaussian state helps more than one
+        feature: TAA, super-resolution, denoising, radiance caching, and
+        interpolation.
+  \item \textbf{Better address space:} history is attached to world, object, or
+        path evidence, not only previous-frame pixels.
+  \item \textbf{Better uncertainty:} each Gaussian carries confidence, variance,
+        visibility age, primitive identity, material identity, and motion
+        residuals.
+  \item \textbf{Compute-friendly:} update, query, and splat operations map to
+        tiled CUDA/Metal-style kernels without turning into a training system.
+  \item \textbf{Acquisition-independent:} the layer consumes the same seed
+        buffers no matter whether the evidence came from CPU, Metal, CUDA
+        software rasterization, CUDA ray traversal, or Gaussian splatting.
+\end{enumerate}
+
+The answer becomes \textbf{no} if each feature needs its own incompatible
+Gaussian state, if the state ghosts more than image history, or if the cost
+beats neither a strong TAAU/SVGF baseline nor a small neural resolver.
+
+The implementation focus is CUDA. CPU code is only a small oracle for
+debugging and expected-value checks; the research artifact should answer
+whether a shared Gaussian state is a good \emph{GPU} integration layer.
+
+\section{Software-Stack Boundary}
+
+This note is a companion to the broader vkGSplat system paper in
+\texttt{papers/vkGSplat.tex}. The system paper argues for a compute-first
+Vulkan path for synthetic data generation: capture existing Vulkan/Wicked
+workloads, lower acquisition to CUDA-class compute, and preserve a stable
+seed-buffer ABI. This note deliberately starts after that boundary. It asks
+whether a persistent Gaussian state is the right reconstruction and reuse
+layer once seed evidence already exists. Therefore the two papers should
+cross-reference each other rather than duplicate material: the system paper
+owns the Vulkan/SDG/hardware-allocation argument, while this note owns the
+3DGS reconstruction, tensorization, radiance-cache, and frame-generation
+algorithms.
+
+The current vkGSplat stack should be read as two independent layers joined by a
+stable seed ABI:
+
+\[
+\begin{gathered}
+\text{Vulkan/Wicked command stream or captured scene state}\\
+\downarrow\\
+\text{software acquisition renderer}\\
+\downarrow\\
+\text{seed buffers}\\
+\downarrow\\
+\text{3DGS/DLSS-class reconstruction layer}
+\end{gathered}
+\]
+
+The acquisition layer answers the question: ``what did the camera observe this
+frame?'' It may use rasterization, ray traversal, shadow/light visibility, or
+Gaussian splatting. Its job is to emit structured measurements, not final
+beauty frames. A seed frame should contain at least:
+
+\begin{itemize}
+  \item linear color or radiance,
+  \item depth and NDC depth,
+  \item primitive/object/material identity,
+  \item camera and previous-camera matrices,
+  \item screen-space motion or enough state to derive it,
+  \item optional normal, albedo, variance, sample count, and path metadata.
+\end{itemize}
+
+The reconstruction layer answers a different question: ``how should these
+measurements be reused over space, time, and scale?'' It owns temporal
+anti-aliasing, denoising, super-resolution, radiance-cache reuse, frame
+interpolation, Gaussian state maintenance, and any learned residual. It should
+not branch on whether the seed came from CPU, Metal, or CUDA acquisition.
+
+This separation changes how to use existing CUDA renderers. \textsc{nvdiffrast}
+is a source-level reference for a CUDA triangle acquisition backend: triangle
+setup, bin rasterization, coarse rasterization, and fine rasterization can
+produce depth, primitive ID, barycentrics, and coverage
+\cite{laine2020nvdiffrast}. The original GraphDECO CUDA rasterizer released
+with 3DGS provides the canonical Gaussian acquisition path
+\cite{kerbl2023gs}; \textsc{gsplat} adds a maintained library reference for
+packed/unpacked projection, tile intersections, flattened IDs, and
+front-to-back compositing \cite{ye2024gsplat}. None of these should leak
+private assumptions into the DLSS-class reconstruction layer. They are
+producers of the same seed ABI.
+
+The clean test is whether a recorded seed buffer can be replayed through the
+reconstruction layer with no acquisition backend present. If it can, the stack
+is modular. If reconstruction code requires calling a particular renderer, the
+boundary has failed.
+
+\section{Relevant Research}
+
+\subsection{Core 3DGS}
+
+3D Gaussian Splatting introduced explicit anisotropic Gaussian primitives with
+fast visibility-aware rendering for real-time radiance-field view synthesis
+\cite{kerbl2023gs}. For vkGSplat, the important lesson is not just fast splats.
+It is that an explicit primitive can be optimized, projected, sorted, blended,
+and inspected.
+
+\subsection{Anti-Aliasing and Scale-Aware Splatting}
+
+Mip-Splatting identifies sampling-rate changes, camera distance, and focal
+length as causes of 3DGS aliasing, then combines 3D smoothing with a 2D
+Mip/box-filter approximation \cite{yu2024mipsplat}. Multi-Scale 3DGS,
+Analytic-Splatting, AAA-Gaussians, LOD-GS, and AA-Splat all strengthen the
+case that splats need footprint-aware filtering before they can be a robust
+temporal reconstruction layer
+\cite{yan2024multiscale,liang2024analytic,steiner2025aaa,yang2025lodgs,suh2026aasplat}.
+
+\subsection{Radiance Caching and Monte Carlo Reconstruction}
+
+GSCache is the closest direct precedent: it uses 3D Gaussian splatting as a
+multi-level path-space radiance cache for volume path tracing
+\cite{bauer2026gscache}. Neural Radiance Caching and Neural Control Variates
+are conceptual ancestors for learned or corrected variance reduction
+\cite{muller2021nrc,muller2020ncv}. SVGF is the practical image-space baseline
+for one-sample-per-pixel real-time path-traced reconstruction
+\cite{schied2017svgf}; KPCN is the classic learned Monte Carlo denoising
+baseline using auxiliary buffers \cite{bako2017kpcn}. ReSTIR shows how
+spatiotemporal sample reuse and biased/unbiased estimators can coexist in a
+real-time renderer \cite{bitterli2020restir}. StochasticSplats and Unified
+Gaussian Primitives show that Monte Carlo estimators and Gaussian
+representations can be coupled more deeply than normal raster splatting
+\cite{kheradmand2025stochasticsplats,zhou2024unified}.
+
+\subsection{Temporal and Motion-Aware Gaussians}
+
+4DGS, Spacetime Gaussian Feature Splatting, 4D-Rotor Gaussian Splatting,
+Gaussian-Flow, GaussianFlow, MotionGS, and KF-GS all point toward Gaussians as
+motion-carrying state, not only static scene primitives
+\cite{wu2024dynamic4dgs,li2023spacetime,duan2024rotor4dgs,lin2023gaussianflow,gao2024gaussianflow,zhu2024motiongs,liu2026kfgs}.
+RetimeGS is especially relevant because it targets continuous-time 4DGS
+retiming and ghost-free arbitrary-timestamp interpolation
+\cite{wang2026retimegs}.
+
+\subsection{DLSS, FSR, and XeSS}
+
+DLSS, FSR, and XeSS set the product bar for temporal upscaling and frame
+generation. DLSS 4 uses transformer models for Super Resolution, DLAA, and Ray
+Reconstruction; DLSS 4.5 upgrades Super Resolution and adds Dynamic Multi Frame
+Generation / 6X MFG on supported hardware
+\cite{nvidia2025dlss4,nvidia2025dlss4research,nvidia2026dlss45}. DLSS 5 raises
+the comparison bar again: the public target is no longer only upscaling and
+frame generation, but a neural renderer that infers lighting/material detail
+from game outputs while preserving temporal control \cite{nvidia2026dlss5}.
+XeSS is AI-based temporal super sampling using jittered color, motion vectors,
+and depth \cite{intel2026xess}. AMD FSR includes temporal upscaling, frame
+generation, and newer ray regeneration/radiance-caching branding
+\cite{amd2026fsr}.
+
+\section{Unified vkGSplat Architecture}
+
+\subsection{One State, Many Views}
+
+The proposed integration layer is a persistent state:
+
+\[
+  G_j =
+  (\mu_j, \Sigma_j, R_j, c_j, f_j, L_j, v_j, m_j,
+   \tau_j, id_j, \dot{\mu}_j, \nu_j, r_j).
+\]
+
+Where:
+
+\begin{itemize}
+  \item $\mu_j, \Sigma_j, R_j$ are position, covariance, and orientation,
+  \item $c_j$ is reconstructed color or albedo-like appearance,
+  \item $f_j$ is a compact learned or hand-authored feature vector,
+  \item $L_j$ is radiance/cache content, possibly split by path depth,
+  \item $v_j$ is variance,
+  \item $m_j$ is sample mass,
+  \item $\tau_j$ is age or last-seen time,
+  \item $id_j$ stores primitive/material/motion group identity,
+  \item $\dot{\mu}_j$ is velocity,
+  \item $\nu_j$ is visibility confidence,
+  \item $r_j$ is residual error, such as projected flow mismatch.
+\end{itemize}
+
+For implementation, split this into a shared core plus task-specific subslots:
+
+\[
+  G_j = (C_j, A_j^{taa}, A_j^{sr}, A_j^{rad}, A_j^{mot}, A_j^{nn}).
+\]
+
+The shared core is:
+
+\[
+  C_j = (\mu_j,\Sigma_j,R_j,\bar{n}_j,id_j,m_j,\tau_j,\nu_j,r_j).
+\]
+
+Task subslots are:
+
+\[
+  A_j^{taa}=(c_j,v_j),\quad
+  A_j^{sr}=(c_j,\Sigma_{screen,j},m_j),\quad
+  A_j^{rad}=(L_j^0,\ldots,L_j^K,V_{L,j}^0,\ldots,V_{L,j}^K),
+\]
+
+\[
+  A_j^{mot}=(\dot{\mu}_j,\mu_j^0,\mu_j^1,R_j^0,R_j^1),
+  \quad
+  A_j^{nn}=f_j.
+\]
+
+This decomposition is the compromise that makes the integration thesis
+testable. The address, visibility, covariance, identity, and confidence are
+shared. Payloads may differ by feature. If the payloads force incompatible
+cores, the unified-state idea fails.
+
+The state exposes multiple projections:
+
+\begin{itemize}
+  \item \textbf{TAA projection:} splat stable history into current pixels.
+  \item \textbf{Super-resolution projection:} resolve target-resolution pixels
+        from accumulated subpixel Gaussian evidence.
+  \item \textbf{Radiance-cache query:} query indirect radiance at path hits.
+  \item \textbf{Frame-interpolation projection:} evaluate state at $t_\alpha$
+        and splat an intermediate frame.
+  \item \textbf{Neural feature projection:} render Gaussian confidence,
+        variance, radiance, age, and motion residuals as inputs to a small
+        learned resolver.
+\end{itemize}
+
+\subsection{Pipeline}
+
+Per frame:
+
+\begin{enumerate}
+  \item Acquire a low-resolution/low-spp seed frame from any backend that
+        satisfies the seed ABI: current CPU fixture, Metal validation path,
+        future CUDA ray/raster path, or optional Gaussian raster path.
+  \item Extract samples: color, depth, NDC depth, normal, primitive ID,
+        material ID, motion vector, path contribution, and optional path depth.
+  \item Update the Gaussian state with visibility and confidence gates.
+  \item Produce task-specific outputs from the same state:
+        TAA history, SR resolve, radiance cache, interpolation state, and
+        neural features.
+  \item Compare against current-frame samples and references, then decay or
+        invalidate stale Gaussians.
+\end{enumerate}
+
+\subsection{Why This Could Beat Separate Systems}
+
+Separate systems duplicate partial history:
+
+\begin{itemize}
+  \item TAA stores image-space color history.
+  \item SVGF stores moments and filtered radiance.
+  \item Super-resolution stores subpixel history.
+  \item Frame interpolation stores optical-flow history.
+  \item Radiance caching stores lighting history.
+\end{itemize}
+
+The 3DGS hypothesis is that these are shadows of the same underlying state:
+where scene evidence was, how it moved, how visible it is, what radiance it
+carried, and how reliable it is. A unified Gaussian state is attractive because
+it can make that evidence explicit.
+
+\section{Formal Model and Algorithms}
+
+\subsection{Observations}
+
+At frame $t$, vkGSplat receives a set of observations:
+
+\[
+  S_t = \{s_i^t\}_{i=1}^{N_t}.
+\]
+
+Each observation can come from a visible pixel, a subpixel jitter sample, or a
+path-tracing event:
+
+\[
+  s_i^t =
+  (x_i, n_i, c_i, L_i^0,\ldots,L_i^K, d_i, z_i, u_i,
+   \rho_i, id_i, q_i, \sigma_i^2).
+\]
+
+Where $x_i$ is world position, $n_i$ is normal, $c_i$ is color, $L_i^k$ is a
+radiance contribution for path-depth level $k$, $d_i$ is depth, $z_i$ is NDC
+depth, $u_i$ is screen-space motion, $\rho_i$ is roughness/material metadata,
+$id_i$ is primitive/material/motion identity, $q_i$ is sample quality, and
+$\sigma_i^2$ is a local variance estimate.
+
+\subsection{Sample Extraction}
+
+For a raster or ray-traced seed pixel $p=(p_x,p_y)$, unproject with the current
+inverse view-projection matrix:
+
+\[
+  x_i =
+  \Pi_t^{-1}(p,z_i)
+  =
+  \left(VP_t\right)^{-1}
+  \begin{bmatrix}
+    2(p_x+\frac{1}{2})/W - 1\\
+    2(p_y+\frac{1}{2})/H - 1\\
+    z_i\\
+    1
+  \end{bmatrix}.
+\]
+
+After homogeneous divide, $x_i$ becomes the world-space address for history.
+This matches the existing vkGSplat reprojection contract: depth plus camera
+matrices are already enough to derive a current-to-previous motion map. The
+Gaussian path simply stores the result in a persistent state.
+
+For temporal super-resolution with scale factor $s\in\{2,4\}$, the low-res
+pixel contributes to high-res coordinates:
+
+\[
+  P_i = s\,p + s\,\delta_t,
+\]
+
+where $\delta_t$ is the subpixel jitter. The sample therefore updates both a
+world-space Gaussian and a subpixel coverage estimate.
+
+For path-traced samples, the extraction point is the path event rather than the
+pixel center:
+
+\[
+  s_i^t =
+  (x_{\ell}, n_{\ell}, \omega_o, \omega_i, \beta_{\ell}L_{\ell},
+   pdf_{\ell}, \ell, id_{\ell}),
+\]
+
+where $\ell$ is path depth and $\beta_{\ell}$ is throughput. The first
+radiance-cache prototype should keep only $\ell=1$ rough/diffuse indirect
+events so the experiment is hard to fool but still easy to debug.
+
+\subsection{Compatibility Gates}
+
+An observation updates a Gaussian only if it is compatible. Define:
+
+\[
+  W_{ij} =
+  w_x\,w_n\,w_d\,w_{id}\,w_\rho\,w_v\,w_r\,w_q.
+\]
+
+Spatial compatibility:
+
+\[
+  w_x =
+  \exp\left(-\frac{1}{2}(x_i-\mu_j)^T\Sigma_j^{-1}(x_i-\mu_j)\right).
+\]
+
+Normal compatibility:
+
+\[
+  w_n =
+  \max(0, n_i \cdot \bar{n}_j)^{\gamma_n}.
+\]
+
+Depth compatibility after projection:
+
+\[
+  w_d =
+  \begin{cases}
+  1, & |\hat{d}_{ij} - d_i| < \epsilon_d,\\
+  0, & \text{otherwise}.
+  \end{cases}
+\]
+
+Identity compatibility:
+
+\[
+  w_{id} =
+  \begin{cases}
+  1, & id_i = id_j,\\
+  \eta_{id}, & id_i \neq id_j \text{ but material-compatible},\\
+  0, & \text{otherwise}.
+  \end{cases}
+\]
+
+Motion compatibility:
+
+\[
+  w_v =
+  \exp\left(-\frac{\|u_i - \hat{u}_j\|^2}{2\sigma_u^2}\right).
+\]
+
+Material/roughness compatibility:
+
+\[
+  w_\rho =
+  \exp\left(-\frac{|\rho_i-\rho_j|^2}{2\sigma_\rho^2}\right).
+\]
+
+Flow residual compatibility:
+
+\[
+  w_r =
+  \exp\left(-\frac{r_j^2}{2\sigma_r^2}\right).
+\]
+
+Sample-quality compatibility:
+
+\[
+  w_q = \mathrm{sat}(q_i).
+\]
+
+These gates are the anti-ghosting core. A prototype may begin with only
+$w_x,w_d,w_{id}$, then add normals, motion, and residuals as the scenes become
+harder.
+
+\subsection{Assignment}
+
+For each observation, find the best compatible Gaussian:
+
+\[
+  j^* = \arg\max_j W_{ij}.
+\]
+
+If $W_{ij^*} < \epsilon_W$, spawn a new Gaussian. Otherwise update $G_{j^*}$.
+The CUDA prototype should use a hashed 3D grid plus primitive buckets,
+fixed-radius cell neighborhoods, and bounded candidate lists. A scalar CPU path
+may exist only as a tiny correctness oracle; it is not the implementation
+target.
+
+\subsection{State Update}
+
+Let $\alpha_{ij}$ be the update weight:
+
+\[
+  \alpha_{ij} =
+  \frac{W_{ij}}{m_j + W_{ij} + \epsilon}.
+\]
+
+Mean update:
+
+\[
+  \mu_j' = (1-\alpha_{ij})\mu_j + \alpha_{ij}x_i.
+\]
+
+Color update:
+
+\[
+  c_j' = (1-\alpha_{ij})c_j + \alpha_{ij}c_i.
+\]
+
+Radiance level update:
+
+\[
+  (L_j^k)' = (1-\alpha_{ij})L_j^k + \alpha_{ij}L_i^k.
+\]
+
+Velocity update:
+
+\[
+  \dot{\mu}_j' =
+  (1-\alpha_{ij})\dot{\mu}_j
+  + \alpha_{ij}\frac{x_i-\mu_j^{prev}}{\Delta t}.
+\]
+
+Sample mass and age:
+
+\[
+  m_j' = \lambda_m m_j + W_{ij},
+  \qquad
+  \tau_j' = t.
+\]
+
+Confidence combines mass, age, variance, and residual consistency:
+
+\[
+  \nu_j =
+  \mathrm{sat}\left(
+    \frac{m_j}{m_j + m_0}
+    \exp(-\lambda_\tau(t-\tau_j))
+    \frac{1}{1+v_j}
+    \exp(-r_j^2 / 2\sigma_r^2)
+  \right).
+\]
+
+Variance can be updated with an exponential moment:
+
+\[
+  v_j' =
+  (1-\alpha_{ij})v_j
+  + \alpha_{ij}\|c_i-c_j\|^2.
+\]
+
+\subsection{Covariance Update}
+
+For a surface-attached Gaussian, use a tangent-frame covariance:
+
+\[
+  \Sigma_j =
+  R_j
+  \begin{bmatrix}
+    \sigma_{t1}^2 & 0 & 0\\
+    0 & \sigma_{t2}^2 & 0\\
+    0 & 0 & \sigma_n^2
+  \end{bmatrix}
+  R_j^T.
+\]
+
+The normal-axis variance should stay small:
+
+\[
+  \sigma_n^2 = \min(\sigma_n^2, \epsilon_n^2).
+\]
+
+For temporal super-resolution, tangent variances should track projected pixel
+footprint and sample density:
+
+\[
+  \sigma_t^2 =
+  \max(\sigma_{min}^2,
+       \beta_f A_{pixel\rightarrow world}
+       /(m_j+\epsilon)).
+\]
+
+This makes Gaussians shrink as evidence accumulates but prevents unstable
+point-like splats.
+
+\subsection{Projection to Pixels}
+
+Project each Gaussian into camera $C_t$:
+
+\[
+  p_j = \Pi_t(\mu_j).
+\]
+
+Approximate the screen-space covariance with the projection Jacobian $J_j$:
+
+\[
+  \Sigma_{screen,j} = J_j\Sigma_jJ_j^T + \Sigma_{pixel}.
+\]
+
+Pixel contribution:
+
+\[
+  a_{pj} =
+  \nu_j
+  \exp\left(
+    -\frac{1}{2}(p-p_j)^T
+    \Sigma_{screen,j}^{-1}
+    (p-p_j)
+  \right).
+\]
+
+Visibility/depth testing gates $a_{pj}$ before blending. The first CUDA
+prototype can use per-tile depth gates and bounded front-to-back candidate
+lists; later versions can use sorted or weighted visibility like ordinary 3DGS.
+
+\subsection{TAA Resolve}
+
+The Gaussian history color for pixel $p$ is:
+
+\[
+  H_t(p) =
+  \frac{\sum_j a_{pj}c_j}{\sum_j a_{pj}+\epsilon}.
+\]
+
+Blend with the current seed color $C_t(p)$:
+
+\[
+  O_t(p) =
+  (1-\beta_p)C_t(p) + \beta_p H_t(p).
+\]
+
+Where:
+
+\[
+  \beta_p =
+  \mathrm{sat}\left(
+  \beta_0
+  \frac{\sum_j a_{pj}}{\sum_j a_{pj}+a_0}
+  \frac{1}{1+\bar{v}_p}
+  \right).
+\]
+
+This is the direct replacement for image-space history. It should fail closed:
+if confidence is low, output the current seed.
+
+\subsection{Temporal Super-Resolution Resolve}
+
+For output pixel $P$ at high resolution and scale factor $s$, use the same
+projection equation but evaluate at the high-resolution pixel center:
+
+\[
+  O^{SR}_t(P) =
+  \frac{\sum_j a_{Pj}c_j + \lambda C^{up}_t(P)}
+       {\sum_j a_{Pj}+\lambda}.
+\]
+
+$C^{up}_t$ is a simple upsampled current frame. $\lambda$ prevents stale
+history from dominating disoccluded regions. This is the first test of
+integration: the TAA and SR resolves must use the same $G_j$, not two separate
+caches.
+
+For 2x and 4x experiments, the only scale-specific term should be the pixel
+footprint:
+
+\[
+  \Sigma_{pixel}^{SR}(s) =
+  \frac{1}{s^2}\Sigma_{pixel}.
+\]
+
+If the method needs a different Gaussian state for 2x and 4x, it fails the
+integration test. A single state may still expose different projection
+footprints.
+
+\subsection{Radiance Cache Query}
+
+At a shading point $x$ with normal $n$, outgoing direction $\omega_o$, roughness
+$\rho$, and path-depth level $k$, query:
+
+\[
+  \hat{L}^k(x,\omega_o) =
+  \frac{\sum_j W_j(x,n,\omega_o,\rho,k)L_j^k}
+       {\sum_j W_j(x,n,\omega_o,\rho,k)+\epsilon}.
+\]
+
+The query weight reuses the same gates as TAA plus roughness/path-depth
+compatibility. The first experiment should query only $k=1$ diffuse or rough
+indirect radiance. Direct lighting remains sampled normally.
+
+Radiance cache update uses the same assignment but separate moments per path
+level:
+
+\[
+  (M_{L,j}^k)' =
+  (1-\alpha_{ij})M_{L,j}^k
+  + \alpha_{ij}L_i^k,
+\]
+
+\[
+  (V_{L,j}^k)' =
+  (1-\alpha_{ij})V_{L,j}^k
+  + \alpha_{ij}\|L_i^k - M_{L,j}^k\|^2.
+\]
+
+When used as a biased indirect-light estimate, the cache contributes directly.
+When used as a safer denoising feature, it is projected into a feature frame:
+
+\[
+  F_L(p,k) =
+  \frac{\sum_j a_{pj}L_j^k}{\sum_j a_{pj}+\epsilon}.
+\]
+
+The unbiased/control-variate path is a later experiment:
+
+\[
+  \hat{I} =
+  G_\theta +
+  \frac{1}{N}\sum_i \frac{f(x_i)-g_\theta(x_i)}{p(x_i)}.
+\]
+
+The first CUDA prototype should not start here. First prove that the biased
+cache reduces variance without unacceptable light leaks.
+
+\subsection{Path-Space Gaussian Reconstruction}
+
+A full path-space Gaussian would live in too many dimensions:
+
+\[
+  \xi =
+  (x_0,\omega_0,x_1,\omega_1,\ldots,x_\ell,\omega_\ell).
+\]
+
+That is not the right first representation for vkGSplat. Instead, use
+surface-attached Gaussians as addresses and attach low-dimensional path
+subslots:
+
+\[
+  A_j^{path}(k,b) =
+  (M_{jkb},Q_{jkb},N_{jkb},R_{jkb}),
+\]
+
+where $k$ is path depth, $b$ is a coarse directional/material lobe, $M$ is the
+mean contribution, $Q$ is the second moment, $N$ is sample count, and $R$ is a
+robust residual. A path event chooses a lobe:
+
+\[
+  b_i =
+  B(\omega_i,\omega_o,\rho_i,material_i).
+\]
+
+The updated contribution is:
+
+\[
+  Y_i =
+  \frac{\beta_i f_i L_i}{p_i},
+\]
+
+with throughput $\beta_i$, scattering term $f_i$, incident radiance $L_i$, and
+sampling density $p_i$. Use robust clamping only for the biased reconstruction
+mode:
+
+\[
+  \bar{Y}_i =
+  \min(\|Y_i\|, c_\sigma\sqrt{Q_{jkb}})\frac{Y_i}{\|Y_i\|+\epsilon}.
+\]
+
+Then update the lobe moments:
+
+\[
+  N'_{jkb}=N_{jkb}+w_i,
+  \qquad
+  M'_{jkb}=M_{jkb}+\frac{w_i}{N'_{jkb}}(\bar{Y}_i-M_{jkb}),
+\]
+
+\[
+  Q'_{jkb}=Q_{jkb}+\frac{w_i}{N'_{jkb}}(\|\bar{Y}_i\|^2-Q_{jkb}).
+\]
+
+This is implementable as a CUDA \texttt{UpdatePathSubslots} kernel.
+The first test should use a single diffuse lobe so $b=0$; if that cannot reduce
+variance without leaking across primitive boundaries, higher-dimensional
+path-space reconstruction is unlikely to rescue the idea.
+
+\subsection{Gaussian Control Variates}
+
+There are two estimator modes, and they should be kept separate in code.
+
+\textbf{Biased reconstruction mode} uses the Gaussian cache as a denoised
+estimate:
+
+\[
+  O_t(p) =
+  C^{direct}_t(p) + \hat{L}^{indirect}_G(p).
+\]
+
+This is the fastest useful prototype and should be judged by MSE, temporal
+stability, and light-leak masks.
+
+\textbf{Control-variate mode} treats the Gaussian cache as a predictor:
+
+\[
+  \hat{I}_{CV} =
+  \frac{1}{N}\sum_{i=1}^N
+  \left(Y_i - g_G(\xi_i)\right)
+  + \hat{G}.
+\]
+
+Here $g_G(\xi_i)$ is the Gaussian prediction evaluated at the same path sample
+and $\hat{G}$ is the cache's estimate of the corresponding integral. This is
+only unbiased if $\hat{G}$ matches the same measure; otherwise it is a biased
+residual estimator. The CUDA-facing API should therefore expose:
+
+\begin{verbatim}
+RadianceEstimate query_biased_radiance(const ShadingQuery& q) const;
+RadianceEstimate query_control_variate(const PathEvent& e) const;
+\end{verbatim}
+
+The falsifiable experiment is straightforward: compare equal-spp variance and
+bias against a high-spp reference for three modes: no cache, biased Gaussian
+cache, and Gaussian residual/control-variate mode. The control-variate path is
+worth pursuing only if variance drops faster than bias rises.
+
+\subsection{Gaussian-Guided Sampling}
+
+Once query quality is established, the cache can guide future samples. Use a
+mixture proposal:
+
+\[
+  p'(y|x) =
+  (1-\eta)p_{base}(y|x) + \eta p_G(y|x).
+\]
+
+The contribution remains MIS-weighted:
+
+\[
+  Y_i' =
+  \frac{f(y_i)}{p'(y_i|x_i)}.
+\]
+
+For the first vkGSplat prototype, $p_G$ should be very simple: choose one of the
+top-$K$ nearby radiance-bearing Gaussians and sample a cosine lobe around its
+mean incident direction. The experiment is a kill test. If Gaussian-guided
+sampling helps only when the scene is already easy, the cache is useful as a
+denoising feature but not as a path-space variance-reduction engine.
+
+\subsection{Motion-Accurate Interpolation}
+
+For midpoint synthesis at $\alpha\in(0,1)$:
+
+\[
+  \mu_j^\alpha =
+  (1-\alpha)\mu_j^0 + \alpha\mu_j^1.
+\]
+
+Constant-velocity fallback:
+
+\[
+  \mu_j^\alpha = \mu_j^0 + \alpha\Delta t\,\dot{\mu}_j^0.
+\]
+
+Confidence is reduced by forward/backward disagreement:
+
+\[
+  \nu_j^\alpha =
+  \nu_j^0\nu_j^1
+  \exp\left(-\frac{\| \Pi_1(\mu_j^1) -
+  (\Pi_0(\mu_j^0)+u_{0\rightarrow1})\|^2}{2\sigma_u^2}\right).
+\]
+
+Splat $G_j^\alpha$ into the midpoint camera and compare against a true rendered
+middle frame. This is motion-accurate only if silhouettes and depth edges land
+correctly, not merely if the image looks plausible.
+
+For rigid objects, the preferred update is not learned velocity but engine
+transform:
+
+\[
+  \mu_j^\alpha =
+  T_{obj}(\alpha)T_{obj}(0)^{-1}\mu_j^0.
+\]
+
+For non-linear motion, use a cubic trajectory once four frames are available:
+
+\[
+  \mu_j(t) = a_jt^3 + b_jt^2 + c_jt + d_j.
+\]
+
+Motion confidence is the minimum of visibility confidence, transform
+confidence, and flow-residual confidence. This ensures frame interpolation
+fails closed in disoccluded or mismatched regions.
+
+\subsection{Frame Generation and Multi-Frame Generation}
+
+Motion-accurate interpolation generates one or more intermediate frames between
+two real frames:
+
+\[
+  \alpha_k = \frac{k}{K+1},
+  \qquad
+  k=1,\ldots,K.
+\]
+
+For each $\alpha_k$, evaluate $G_j^{\alpha_k}$ and splat with the same
+visibility/confidence gates used by midpoint interpolation. The frame is not
+accepted as a confident generated frame unless the per-pixel support is strong:
+
+\[
+  S_{\alpha}(p)=\sum_{j\rightarrow p}a_{pj}^{\alpha}\nu_j^{\alpha},
+  \qquad
+  S_{\alpha}(p) > S_{min}.
+\]
+
+Pixels with weak support become holes:
+
+\[
+  H_{\alpha}(p)=
+  \begin{cases}
+  1, & S_{\alpha}(p)\leq S_{min}\ \text{or}\ D_{\alpha}(p)=1,\\
+  0, & \text{otherwise}.
+  \end{cases}
+\]
+
+The generated output is therefore explicitly decomposed:
+
+\[
+  O_{\alpha}(p) =
+  (1-H_{\alpha}(p))O_{\alpha}^{gauss}(p)
+  + H_{\alpha}(p)O_{\alpha}^{fallback}(p).
+\]
+
+For a non-neural prototype, $O_{\alpha}^{fallback}$ is nearest real-frame hold
+or image-space reprojection. For a neural prototype, it is a bounded residual
+resolver conditioned on the hole mask. This is important: vkGSplat should not
+pretend 3DGS solved disoccluded background generation. It should make unknown
+regions first-class.
+
+For extrapolative frame generation, predict from one real frame:
+
+\[
+  \hat{\mu}_j(t+\Delta) =
+  \mu_j(t) + \Delta\dot{\mu}_j(t) +
+  \frac{1}{2}\Delta^2\ddot{\mu}_j(t).
+\]
+
+Uncertainty must grow with prediction horizon:
+
+\[
+  \hat{\Sigma}_j(t+\Delta) =
+  \Sigma_j(t) + \Delta^2\Sigma_{\dot{\mu},j}
+  + \Delta^4\Sigma_{\ddot{\mu},j} + Q_j\Delta,
+\]
+
+\[
+  \hat{\nu}_j(t+\Delta) =
+  \nu_j(t)
+  \exp(-\Delta/\tau_{motion})
+  \exp(-r_j^2/2\sigma_r^2).
+\]
+
+This turns long-horizon frame generation into a confidence problem rather than
+a hallucination problem. The first experiment should generate only one
+midpoint. The second can generate $K=2$ intermediate frames. Extrapolation
+should wait until interpolation passes the silhouette and disocclusion tests.
+
+\subsection{Frame-Generation Experiments}
+
+Use three clips:
+
+\begin{enumerate}
+  \item \textbf{Rigid transform clip:} one object with known object transform.
+        Expected pass: generated silhouettes match the held-out real frames.
+  \item \textbf{Camera strafe clip:} static scene with disocclusion. Expected
+        pass: disoccluded holes are masked and do not receive high confidence.
+  \item \textbf{Specular/deforming clip:} intentionally hard case. Expected
+        pass: residual and confidence metrics predict failure rather than
+        hiding it.
+\end{enumerate}
+
+Report generated-frame metrics separately from TAA/SR metrics:
+
+\[
+  E_{FG} =
+  E_{mid} + \lambda_sE_{sil}+\lambda_hE_{hole}
+  + \lambda_fE_{flow}.
+\]
+
+The shared-state thesis is supported only if frame generation reuses the same
+Gaussian core and if its failure masks are useful to the TAA/SR/neural paths.
+
+\subsection{Neural Feature Projection}
+
+The optional neural resolver should not receive an opaque ``Gaussian image.''
+It should receive explicit feature planes:
+
+\[
+  \Phi_t(p) =
+  [H_t(p), F_L(p,0),\ldots,F_L(p,K), \bar{v}_p,
+   \bar{\nu}_p, \bar{\tau}_p, \bar{r}_p, D_p, M_p].
+\]
+
+Where $D_p$ is a disocclusion likelihood and $M_p$ is a motion-consistency
+feature. A compact model can then learn the residual:
+
+\[
+  O_t(p) =
+  O^{analytic}_t(p) +
+  N_\theta(C_t, depth_t, velocity_t, \Phi_t)(p).
+\]
+
+The key ablation is equal model size with and without $\Phi_t$. If Gaussian
+features do not improve quality or reduce model size, the integration layer is
+less useful than hoped.
+
+\subsection{Split, Merge, and Prune}
+
+Split a Gaussian when it is high-confidence but high-variance:
+
+\[
+  m_j > m_{split}
+  \quad\text{and}\quad
+  v_j > v_{split}.
+\]
+
+Merge two Gaussians when they are compatible and neither split nor depth gates
+object:
+
+\[
+  D_{KL}(\mathcal{N}_a,\mathcal{N}_b) < \epsilon_{merge},
+  \quad id_a = id_b.
+\]
+
+Prune stale Gaussians:
+
+\[
+  \nu_j < \epsilon_\nu
+  \quad\text{or}\quad
+  t-\tau_j > T_{max}.
+\]
+
+The first CUDA implementation can skip split/merge and only spawn/prune. Split
+and merge become necessary if the shared state blurs thin geometry or grows
+without bound.
+
+\subsection{Visibility and Lifetime Update}
+
+Visibility is the part most likely to decide whether the unified state works.
+Every frame, a Gaussian can be observed, occluded, disoccluded, or simply
+outside the frustum. Treat these as different lifetime events:
+
+\[
+  \ell_j^t \in
+  \{\mathrm{visible},\mathrm{occluded},\mathrm{disoccluded},
+    \mathrm{out\_of\_frustum}\}.
+\]
+
+If a projected Gaussian lands behind the current depth buffer by more than a
+threshold, it is occluded, not stale:
+
+\[
+  \ell_j^t=\mathrm{occluded}
+  \quad\text{if}\quad
+  d_j^t - D_t(p_j) > \epsilon_{occ}.
+\]
+
+If it lands in front of current depth or disagrees with primitive ID, it is
+potentially stale:
+
+\[
+  \ell_j^t=\mathrm{disoccluded}
+  \quad\text{if}\quad
+  D_t(p_j)-d_j^t > \epsilon_{front}
+  \quad\text{or}\quad
+  id_j \neq ID_t(p_j).
+\]
+
+Use different confidence decay rates:
+
+\[
+  \nu_j^{t+1} =
+  \begin{cases}
+    \min(1,\nu_j^t+\Delta_\nu), & \ell_j^t=\mathrm{visible},\\
+    \lambda_{occ}\nu_j^t, & \ell_j^t=\mathrm{occluded},\\
+    \lambda_{dis}\nu_j^t, & \ell_j^t=\mathrm{disoccluded},\\
+    \lambda_{frustum}\nu_j^t, & \ell_j^t=\mathrm{out\_of\_frustum}.
+  \end{cases}
+\]
+
+Require $\lambda_{dis}<\lambda_{occ}$. Occluded objects should be allowed to
+survive; disoccluded stale history should disappear quickly. This distinction
+is essential for frame interpolation and TAA: otherwise the cache either ghosts
+or forgets too aggressively.
+
+
+\subsection{Tensorized Kernel ABI and M--N--K Estimates}
+
+The intended vkGSplat kernel ABI is tensorized, even when the implementation is
+custom CUDA rather than generic PyTorch. The important boundary is:
+
+\begin{quote}
+All persistent state, all seed inputs, and all reconstruction outputs should be
+represented as contiguous tensor-shaped structure-of-arrays buffers. Irregular
+operations such as compaction, grid build, assignment, split/merge, and splat
+resolve remain custom CUDA tensor operators.
+\end{quote}
+
+This gives vkGSplat two front doors over the same kernels. The research front
+door accepts \texttt{torch.Tensor}/\textsc{nvdiffrast} buffers; the runtime
+front door accepts Vulkan-exported CUDA memory with the same shapes and
+strides. PyTorch should be a caller and allocator for experiments, not the
+owner of the renderer architecture.
+
+For the rest of this note, use the following M--N--K convention:
+
+\begin{itemize}
+  \item $M$ is the number of observations entering a kernel: raster pixels,
+        depth-peel pixels, stochastic samples, or compacted seed hits.
+  \item $N$ is the number of active persistent Gaussian records available to
+        query, update, project, or resolve.
+  \item $K$ is the feature width carried by each observation, Gaussian, or
+        projected feature plane. Local nearest-neighbor candidate count is
+        written as $C$ so it is not confused with feature width.
+\end{itemize}
+
+The acquisition tensor contract should start as:
+
+\[
+\begin{aligned}
+  R      &\in \mathbb{R}^{B\times H\times W\times 4},
+          &&R=(u,v,z/w,id_{tri}+1),\\
+  C_{img}&\in \mathbb{R}^{B\times H\times W\times 4},
+          &&\text{radiance or color plus confidence/alpha},\\
+  X      &\in \mathbb{R}^{B\times H\times W\times 3},
+          &&\text{world position from interpolation or ray hit},\\
+  Nrm    &\in \mathbb{R}^{B\times H\times W\times 3},
+          &&\text{world normal},\\
+  V_{px} &\in \mathbb{R}^{B\times H\times W\times 2},
+          &&\text{previous-pixel minus current-pixel motion}.
+\end{aligned}
+\]
+
+A tensorized extraction kernel compacts valid hits into structure-of-arrays:
+
+\[
+\begin{aligned}
+  X_s       &\in \mathbb{R}^{M_s\times 3}, &
+  N_s       &\in \mathbb{R}^{M_s\times 3}, &
+  L_s       &\in \mathbb{R}^{M_s\times 4},\\
+  p_s       &\in \mathbb{R}^{M_s\times 2}, &
+  v_s       &\in \mathbb{R}^{M_s\times 2}, &
+  b_s       &\in \mathbb{R}^{M_s\times 2},\\
+  q_s       &\in \mathbb{R}^{M_s\times 2}, &
+  I_s       &\in \mathbb{Z}^{M_s\times 4}. &
+\end{aligned}
+\]
+
+Here $q_s=(z/w,\nu)$ and $I_s=(id_{tri},id_{px},id_{batch},flags)$. The
+current minimal sample width is therefore
+
+\[
+  K_s = 18\text{ fp32 lanes} + 4\text{ int32 lanes}
+      \approx 88\text{ bytes per compact sample}.
+\]
+
+Material IDs, roughness/metalness, per-sample variance, depth derivatives, and
+path-space throughput should be appended as extra tensor columns. The first
+CUDA implementation should keep the minimal $K_s$ above, then measure which
+extra channels actually improve denoising, temporal stability, or frame
+interpolation.
+
+The persistent Gaussian state should also be SoA tensors:
+
+\[
+\begin{aligned}
+  \mu       &\in \mathbb{R}^{N\times 3}, &
+  \Sigma   &\in \mathbb{R}^{N\times 6}, &
+  \bar L   &\in \mathbb{R}^{N\times 4},\\
+  \sigma_L^2 &\in \mathbb{R}^{N\times 4}, &
+  \bar n   &\in \mathbb{R}^{N\times 3}, &
+  \bar v   &\in \mathbb{R}^{N\times 3},\\
+  h        &\in \mathbb{R}^{N\times K_h}, &
+  meta     &\in \mathbb{Z}^{N\times K_i}. &
+\end{aligned}
+\]
+
+A no-neural analytic state needs roughly $K_g=32$--$48$ fp32 lanes plus
+$K_i=4$--$8$ integer lanes per Gaussian: mean, covariance, radiance moments,
+normal, velocity, mass/confidence, timestamps, primitive/material identity,
+cell key, and flags. At fp32 this is about $160$--$240$ bytes per Gaussian. A
+small learned residual can add $K_h=16$--$64$ feature lanes, increasing the
+state by $64$--$256$ bytes per Gaussian. This is why the default experiment
+should prove value with $K_h=0$ before adding neural features.
+
+Let $P=H W$, $S$ be the number of acquisition samples per pixel, $L$ the number
+of depth layers, and $\rho$ the valid-surface hit ratio. Then
+
+\[
+  M_{raw}=B P S L,
+  \qquad
+  M_s\approx \rho M_{raw}.
+\]
+
+For DLSS-style super-resolution the output pixel count grows with the linear
+scale $r$:
+
+\[
+  P_{out}=r^2P,
+\]
+
+but $M_s$ does not need to grow with $r$ unless vkGSplat deliberately acquires
+extra subpixel samples. This distinction is important: the Gaussian state is
+supposed to amortize history and geometry so a $2\times$ or $4\times$ resolve
+can increase projected output work without requiring $4\times$ or $16\times$
+new shading work every frame.
+
+The first-order $M$ and $N$ budgets are:
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Mode & $P$ & $M_s$ single layer & $M_s$ 4 jitter/depth & $N$ retained & State memory \\
+\midrule
+1080p & $2.07$M & $1.2$--$2.0$M & $5$--$8$M & $1.5$--$4$M & $0.25$--$1.0$GB \\
+1440p & $3.69$M & $2.2$--$3.5$M & $9$--$14$M & $3$--$7$M & $0.5$--$1.7$GB \\
+4K    & $8.29$M & $5$--$8$M   & $20$--$32$M & $6$--$16$M & $1.0$--$4.0$GB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The $N$ range assumes that visible surfaces need roughly $0.5$--$1.5$
+Gaussians per currently valid pixel after merging, plus a history retention
+factor of $1.5$--$3.0$ for temporarily occluded or subpixel evidence. Thin
+geometry, particles, foliage, transparencies, and depth peeling push $N$ upward;
+flat static walls should merge down aggressively. If $N$ must exceed about
+$2P$ for ordinary opaque scenes, the covariance/update rules are probably too
+fragmented. If $N<0.25P$ cannot preserve edges and subpixel motion, the state
+is probably too coarse for DLSS-class reconstruction.
+
+The key kernel shapes are:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Kernel & Shape & Main cost & Health target \\
+\midrule
+Extract hits & $M_{raw}\rightarrow M_s$ & $O(M_{raw})$ & bandwidth-bound, one pass \\
+Build grid & $N\rightarrow$ cells & $O(N)$ + scan & $B_{p99}$ bounded \\
+Assign samples & $M_s\times C$ & local search & $C\le 32$ typical, $C\le 64$ p99 \\
+Reduce updates & $M_s\rightarrow N$ & sort or segmented reduce & fewer atomics than direct update \\
+Project splats & $N\rightarrow$ tiles & tile-list emission & reused by TAA/SR/framegen \\
+Resolve & $P_{out}\times K_p$ & tile traversal & no duplicated feature passes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Projected resolver feature width should begin small:
+
+\[
+  K_p \approx 16\text{--}32
+  \quad\text{for}\quad
+  (L,\alpha,z,n,v,\nu,\sigma^2,id,coverage,age,flags).
+\]
+
+where integer IDs can live in parallel integer tensors. A neural resolver may
+consume $K_p=32$--$96$ channels, but the pass/fail experiment should compare
+against the analytic $K_p\le 32$ case first.
+
+These estimates imply three CUDA milestones:
+
+\begin{enumerate}
+  \item \textbf{M0 tensor extraction:} $M_s\le 2$M, $N=0$, $K_s=18+4$.
+        Demonstrate \textsc{nvdiffrast}/Vulkan seed tensors can become compact
+        sample tensors in less than one millisecond at 1080p-class sizes on a
+        desktop CUDA GPU.
+  \item \textbf{M1 persistent update:} $M_s=1$--$4$M, $N=1$--$3$M,
+        $K_g\le 48$. Demonstrate bounded grid occupancy, stable assignment,
+        and lower temporal variance than image-space history on camera motion.
+  \item \textbf{M2 DLSS-class resolve prototype:} $M_s=2$--$8$M,
+        $N=3$--$8$M, $K_p=16$--$32$ analytic or $K_p\le 96$ with a small
+        neural residual. Demonstrate TAA/SR/frame-interpolation benefit from
+        one shared state rather than separate feature-specific histories.
+\end{enumerate}
+
+A negative result is useful if it is dimensional: too much $M$ bandwidth, too
+large an $N$ retention factor, or too wide a $K$ for the quality gained. The
+experiments should report all three numbers for every image-quality result.
+
+\subsection{Mixed-Precision Gaussian State and FP16/FP8/FP4 Policy}
+
+vkGSplat should use lower precision aggressively, but only with a two-copy
+rule: keep the canonical estimator state accurate enough to remain stable, and
+materialize lower-precision tile packets for bandwidth- and tensor-core-heavy
+work. This is different from quantizing the whole renderer. Geometry, motion,
+visibility, and estimator control should not become FP4-only state.
+
+The hardware reason is strong. Hopper-class Tensor Cores expose FP8 paths with
+E4M3 and E5M2 formats, where E4M3 gives more precision and E5M2 gives wider
+range \cite{nvidia2022hopper,nvidia2026transformerenginefp8}. CUDA also exposes
+FP4, FP6, FP8, FP16, and BF16 math/intrinsic support in the low-precision API
+surface \cite{nvidia2026cudamath}. Blackwell-style NVFP4 uses an E2M1 element
+with hierarchical block scaling, making it a plausible tensor format for
+neural weights, activations, and compact learned features, but not a safe
+standalone geometry format \cite{nvidia2026nvfp4}. The OCP MX specification is
+also standardizing microscaled FP4/FP6/FP8-style interchange formats, which is
+relevant if vkGSplat later targets non-CUDA accelerators \cite{ocp2026mx}.
+
+The precision policy should be field-specific:
+
+\begin{center}
+\small
+\begin{tabular}{p{0.30\linewidth}p{0.17\linewidth}p{0.40\linewidth}}
+\toprule
+State or packet field & Preferred format & Rationale \\
+\midrule
+Camera matrices, canonical centers $\mu$, covariance update accumulators & FP32 & Keeps reprojection, assignment, and long-lived estimator state stable. \\
+Canonical covariance factors, normal, velocity, opacity, radiance moments & FP32/FP16 & Store master accumulators in FP32 where drift matters; expose FP16 render views. \\
+Per-tile projected features, analytic resolver features, radiance-cache feature vectors & FP16/FP8 & Bandwidth-heavy and tensor-friendly; use per-tile or per-block scaling. \\
+Neural resolver weights, latent residual channels, compressed cache codes & FP8/FP4 & Best FP4 target; require calibration or quantization-aware training. \\
+Primitive IDs, material IDs, tile indices, flags, sample counts, timestamps & integer & Never float-quantize identity or ordering metadata. \\
+Variance, confidence, visibility gates, disocclusion scores & FP16/FP32 & These control history acceptance; quantization error becomes ghosting. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The implementation should therefore split persistent state from working state:
+
+\[
+  S^{master}_j = (\mu_j,\Sigma_j,\bar L_j,\bar n_j,\bar v_j,\nu_j,meta_j)
+  \quad\rightarrow\quad
+  P^{tile}_{j,t} = Q_{p,t}(S^{master}_j),
+\]
+
+The master copy uses FP32/FP16 plus integer metadata. The tile packet is a
+transient low-precision view used by projection, feature resolve,
+radiance-cache lookup, or neural decode. For a block $b$ of feature values $x_i$, a generic
+block-scaled packet is
+
+\[
+  q_i = Q_p(x_i/s_b),
+  \qquad
+  \tilde{x}_i = s_b D_p(q_i),
+\]
+
+where $p\in\{\mathrm{fp8},\mathrm{fp4}\}$, $Q_p$ quantizes, $D_p$ dequantizes,
+and $s_b$ is a tile, cache-page, or micro-block scale. NVFP4-style packets add
+a tensor-level scale:
+
+\[
+  \tilde{x}_i = s_{global}s_{block}D_{E2M1}(q_i).
+\]
+
+This is a natural match for Gaussian radiance cache pages: the page table can
+store both residency metadata and quantization scales, just as KV-cache systems
+store block/page metadata for attention. The page size should be chosen so one
+cache page holds a small integer number of Gaussian feature blocks and their
+scales, for example $16$--$64$ Gaussians times $K_h=16$--$64$ feature lanes.
+
+Concrete CUDA kernels:
+
+\begin{enumerate}
+  \item \textbf{PackGaussianTilePackets:} read canonical SoA state, project or
+        select tile-local Gaussians, compute per-block scales, and emit FP16,
+        FP8, or FP4 packet tensors plus scales.
+  \item \textbf{TensorFeatureProjectFP8:} evaluate small feature projections or
+        MLP-style basis transforms with FP8 inputs and FP16/FP32 accumulation.
+  \item \textbf{QuantizedRadianceCacheLookup:} gather page-resident radiance
+        features, dequantize into registers/shared memory, and blend with
+        analytic visibility and confidence gates.
+  \item \textbf{NeuralResolveFP4FP8:} run the optional transformer/MLP resolver
+        on FP8 activations and FP4/FP8 weights, accumulating in FP16 or FP32.
+  \item \textbf{ApplyGaussianDeltas:} write updates back to the canonical
+        state in FP32/FP16 only after compatibility gates and reductions.
+\end{enumerate}
+
+The first experiments should treat precision as an ablation axis rather than a
+one-way optimization:
+
+\begin{center}
+\small
+\begin{tabular}{p{0.20\linewidth}p{0.50\linewidth}p{0.20\linewidth}}
+\toprule
+Ablation & Change & Pass condition \\
+\midrule
+P0 & FP32 canonical state and FP32/FP16 resolve baseline & Reference. \\
+P1 & FP16 render view for color, opacity, normal, velocity, and covariance factors & $\le 0.2$dB PSNR loss and no visible increase in flicker. \\
+P2 & FP8 projected features and radiance-cache feature pages & $\le 0.3$dB loss, $\le 10\%$ flicker increase, measurable bandwidth reduction. \\
+P3 & FP4 latent resolver weights or residual channels only & $\le 0.5$dB loss versus FP8 resolver and at least $1.3\times$ resolver throughput or bandwidth gain. \\
+P4 & FP4 geometry/covariance negative control & Expected to fail; confirms why canonical geometry remains higher precision. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Report image metrics (PSNR, SSIM, LPIPS), temporal metrics (flicker,
+disocclusion, interpolation endpoint error), and GPU metrics (cache bandwidth,
+tensor-core utilization, packet conversion cost, and memory footprint). A
+successful result would show that FP16/FP8 reduce the cost of the shared
+Gaussian state without weakening history rejection. FP4 should only become
+useful once the work has been turned into a calibrated tensor decode problem.
+
+\subsection{Transformer Architecture: Optional Resolver, Not Core State}
+
+Transformer architecture is relevant, but it should enter vkGSplat at the
+resolver boundary rather than at the core Gaussian-state boundary. NVIDIA's
+DLSS 4 moved Super Resolution, Ray Reconstruction, and DLAA from a CNN lineage
+to a real-time vision-transformer model with self-attention over frame and
+multi-frame evidence \cite{nvidia2025dlss4}. NVIDIA's DLSS 4.5 announcement
+then describes a second-generation transformer model for Super Resolution
+\cite{nvidia2026dlss45,nvidia2026dlssdeveloper}. This is strong evidence that
+a DLSS-class product should expect transformer-style neural resolving to be
+competitive.
+
+For vkGSplat, however, a transformer should not replace the explicit Gaussian
+state. The project hypothesis is that geometry, visibility, radiance, motion,
+and confidence should be maintained explicitly in CUDA tensors. A transformer,
+if used, consumes the projected Gaussian feature tensors and predicts a bounded
+residual:
+
+\[
+  \hat I_{hi} = R_\theta(F_t, F_{t-1}, D_t, V_t, M_t) + I_{analytic},
+\]
+
+where $F_t\in\mathbb{R}^{B\times H_o\times W_o\times K_p}$ is the projected
+Gaussian feature tensor, $D_t$ is depth, $V_t$ is motion, $M_t$ is a mask/ID
+feature tensor, and $I_{analytic}$ is the non-neural Gaussian/TAA/SR resolve.
+The model should learn what the analytic state cannot model cleanly:
+high-frequency shading residuals, difficult disocclusions, specular flicker,
+and perceptual anti-aliasing. It should not be responsible for discovering
+basic geometry or motion from scratch.
+
+A practical transformer budget should be windowed and temporal-local rather
+than global full-frame attention. Full attention over $P$ pixels scales as
+$O(P^2)$ and is not a credible real-time starting point. Window attention with
+window size $w\times w$ scales as
+
+\[
+  O(P\,w^2\,K_p),
+\]
+
+plus small cross-frame token mixing. For 1080p, $w=8$ gives 64-token local
+attention; $w=16$ gives 256 tokens and should be treated as a high-quality
+ablation, not the default. The first neural resolver should therefore be:
+
+\begin{itemize}
+  \item a tiny windowed transformer or hybrid Conv/Transformer block,
+  \item input $K_p=32$--$96$ projected Gaussian and engine features,
+  \item two to four previous-frame feature tensors at most,
+  \item output either residual color, confidence/mask correction, or SR color,
+  \item trained and evaluated against an equal-parameter image-space model.
+\end{itemize}
+
+The transformer decision should be staged:
+
+\begin{enumerate}
+  \item \textbf{No-transformer baseline:} analytic CUDA tensors only. This must
+        already demonstrate that shared Gaussian state improves at least one of
+        TAA, SR, denoising, radiance caching, or interpolation.
+  \item \textbf{Small transformer resolver:} consume projected Gaussian feature
+        tensors and compare against an image-only transformer with the same
+        parameter count and input resolution.
+  \item \textbf{Product-scale transformer:} only after the shared state wins the
+        ablation. This path may resemble DLSS-class neural resolving, but it is
+        not needed to validate the vkGSplat integration hypothesis.
+\end{enumerate}
+
+The pass/fail rule is simple. If a transformer improves both image-space and
+Gaussian-feature versions equally, the value is mostly neural resolving. If the
+same transformer is smaller, faster, or more stable when fed projected Gaussian
+features, then the explicit Gaussian state is helping. Record $M$, $N$, $K_p$,
+parameter count, attention window size, and frame history length for every
+neural experiment.
+
+\subsection{Why Transformer/LLM Architecture Reuse Is Plausible}
+
+The striking architectural point is that vkGSplat can look like graphics at the
+API boundary while looking like Transformer serving inside the expensive part of
+the machine. The prefill stage acquires structured evidence from the scene:
+color, depth, IDs, barycentrics, normals, motion, visibility, and sparse
+radiance samples. The decode stage repeatedly queries persistent state, pages
+Gaussian/radiance features, projects local tokens, and resolves pixels, higher
+resolution samples, or intermediate frames. That is much closer to a
+stateful cache-plus-tensor workload than to a classical fixed-function graphics
+pipeline.
+
+With no learned model, the analogy is still useful because Gaussian history and
+radiance cache pages behave like a structured memory. With an optional
+transformer resolver, the analogy becomes literal: projected Gaussian features,
+tile features, and motion-aligned history become tokens, while the Gaussian
+radiance cache plays the role of a geometry-aware KV cache. This does not mean
+vkGSplat is an LLM. It means the hardware primitives that make LLM serving fast
+-- tiled matrix engines, low-precision formats, cache paging, block tables,
+gather/scatter, reductions, and bandwidth scheduling -- are also the right
+primitives for the decode half of this renderer.
+
+\begin{center}
+\small
+\begin{tabular}{p{0.23\linewidth}p{0.32\linewidth}p{0.34\linewidth}}
+\toprule
+Transformer/LLM serving idea & vkGSplat counterpart & Hardware implication \\
+\midrule
+Prompt prefill & Raster/ray/splat acquisition produces seed evidence $A_t$ & Keep graphics-specific logic narrow and evidence-oriented. \\
+KV cache & Persistent Gaussian history, radiance cache, motion state, and feature pages & Invest in SRAM/HBM bandwidth, paging, and cache residency policy. \\
+Token blocks/pages & Tile pages, Gaussian pages, radiance-cache pages, and feature blocks & Reuse block tables, page allocators, and compaction/eviction logic. \\
+Attention over tokens & Local attention or analytic mixing over pixels, Gaussians, tiles, and history frames & Favor block-sparse tensor kernels and tile-local reuse. \\
+Decode loop & Per-frame TAA/SR/denoise/framegen resolve from persistent state & Optimize repeated cache queries and low-launch-count decode kernels. \\
+Quantized KV cache & FP8/FP4 Gaussian feature pages and neural resolver packets & Reuse low-precision scaling, calibration, and packet formats. \\
+Continuous batching & Batched cameras, views, scenes, or training-data jobs & Schedule many small tile/view jobs like serving requests. \\
+Speculative decoding & Motion-predicted intermediate frames or candidate disocclusion fills & Add cheap prediction paths with later validation/rejection. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A useful mental diagram is:
+
+\begin{figure}[h]
+\centering
+\small
+\setlength{\fboxsep}{6pt}
+\begin{tabular}{c}
+\fbox{\begin{minipage}{0.78\linewidth}
+\centering
+\textbf{Graphics/evidence prefill}\\
+minimal raster, ray, or splat acquisition\\
+$A_t=(L,D,ID,X,N,V,M,\nu,\sigma^2)$
+\end{minipage}}\\[0.6em]
+$\Downarrow$\\[0.6em]
+\fbox{\begin{minipage}{0.78\linewidth}
+\centering
+\textbf{Persistent Gaussian/cache state}\\
+$G_t$ plus paged radiance/history/features $\mathcal{C}_t$\\
+page tables, lifetimes, confidence, scales, visibility gates
+\end{minipage}}\\[0.6em]
+$\Downarrow$\\[0.6em]
+\fbox{\begin{minipage}{0.78\linewidth}
+\centering
+\textbf{Transformer-like decode}\\
+analytic or learned tile resolver\\
+TAA, SR, denoise, radiance reuse, frame interpolation, frame generation
+\end{minipage}}
+\end{tabular}
+\caption{vkGSplat as structured evidence acquisition plus stateful decode. The
+prefill side benefits from a small amount of graphics-specific visibility
+hardware. The decode side is dominated by tensor, cache, paging, quantization,
+and scheduling machinery that overlaps strongly with Transformer serving.}
+\label{fig:vkgsplat-llm-serving-analogy}
+\end{figure}
+
+This leads to a concrete hardware rule. If area is scarce, graphics-specific
+hardware should be added only where it improves evidence quality per joule:
+depth, primitive IDs, barycentrics, motion vectors, simple texture/material
+samples, and perhaps ray-hit evidence. The larger investment should remain in
+the decode substrate: tensor engines, SRAM/HBM bandwidth, page tables,
+low-precision feature packets, tile scheduling, and sparse gather/reduce
+kernels. A full legacy raster/ROP/texture/RT stack is less attractive unless
+experiments show that the prefill evidence is the dominant quality or energy
+bottleneck.
+
+The falsifiable experiment is an area-proxy ablation, not just an image-quality
+ablation. Hold total time or bandwidth budget fixed and compare:
+
+\begin{enumerate}
+  \item \textbf{graphics-heavy prefill, weak decode:} higher-spp or higher-res
+        seed buffers, but small Gaussian/cache decode;
+  \item \textbf{minimal prefill, strong decode:} sparse seed buffers, larger
+        Gaussian state, better cache paging, and tensorized decode;
+  \item \textbf{minimal prefill plus transformer resolver:} same seed and state
+        as (2), but add a small learned tile resolver;
+  \item \textbf{balanced bridge:} minimal prefill plus a narrow tile-splat
+        accelerator for Gaussian binning, projection, and compositing.
+\end{enumerate}
+
+If (2) or (3) wins at equal bandwidth and latency, vkGSplat should lean toward
+LLM-style tensor/cache architecture. If (1) wins decisively, then more graphics
+prefill hardware is justified. If (4) wins, the right hardware is not a full
+classic graphics pipeline but a narrow Gaussian/tile bridge between acquisition
+and decode.
+
+\subsection{Prefill/Decode Split and Hardware Investment}
+
+vkGSplat should explicitly adopt a prefill/decode architecture. The prefill
+stage is the expensive real-frame evidence stage; the decode stage is the
+cheaper reconstruction/generation stage that reuses persistent Gaussian and
+feature caches.
+
+\[
+\begin{aligned}
+  \textsc{Prefill}(A_t,G_{t-1}) &\rightarrow (G_t,\mathcal{C}_t),\\
+  \textsc{Decode}(G_t,\mathcal{C}_t,\alpha,r) &\rightarrow \hat I_{t+\alpha}^{(r)}.
+\end{aligned}
+\]
+
+Here $A_t$ is the acquired real-frame evidence tensor bundle, $G_t$ is the
+persistent Gaussian state, $\mathcal{C}_t$ is the tile/feature/cache bundle,
+$\alpha$ is the generated-frame time offset, and $r$ is the super-resolution
+scale. The prefill stage performs acquisition, hit extraction, assignment,
+Gaussian update, visibility decay, grid build, tile-list construction, and
+optional neural key/value construction. The decode stage projects/querys this
+state to produce TAA, SR, DLAA, frame interpolation, or generated frames.
+
+The average cost of one real frame plus $q$ decoded outputs is approximately
+
+\[
+  T_{avg}(q)=\frac{T_{prefill}+qT_{decode}}{q+1}.
+\]
+
+The architecture is useful only if $T_{decode}\ll T_{prefill}$ and cache
+invalidations remain spatially sparse. A rough cost model is
+
+\[
+\begin{aligned}
+  T_{prefill} &\sim aM_{raw}+bM_sC+cN+T_{scan/sort}+T_{state},\\
+  T_{decode}  &\sim dP_{out}K_p+eN_{vis}+T_{attn/cache},\\
+  T_{attn/cache} &\sim fP_{out}w^2K_a
+        \quad\text{for windowed attention.}
+\end{aligned}
+\]
+
+This model clarifies the hardware bet. Rasterization, texture, and ray-tracing
+hardware remain essential evidence engines. They generate primary visibility,
+texture/material samples, ray-traced lighting evidence, shadows, reflections,
+disocclusion masks, and correctness anchors. Tensor hardware and KV-cache-like
+memory systems are the likely decode engines: they turn sparse explicit state
+and projected feature tensors into high-rate frames, super-resolution outputs,
+and neural residuals.
+
+Therefore vkGSplat should not frame the choice as raster/texture/RT
+\emph{versus} tensor/KV cache. The better architecture is:
+
+\begin{quote}
+Rasterization, texture, and ray tracing produce high-quality prefill evidence;
+tensor cores, cache residency, sparse lookup, and KV-like feature caches make
+repeated decode cheap.
+\end{quote}
+
+For vkGSplat research effort, the marginal investment should lean toward the
+second half because ordinary rasterization already exists while DLSS-class
+multi-decode reconstruction depends on cache reuse. A practical effort split is:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Area & Suggested emphasis & Reason \\
+\midrule
+Raster/texture/RT acquisition & 20--30\% & reliable evidence and baselines \\
+Tensorized Gaussian/cache kernels & 40--50\% & core vkGSplat differentiator \\
+KV-like neural/tile feature cache & 15--25\% & makes multi-decode economical \\
+Interop/profiling/evaluation & 10--15\% & proves real frame-time value \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For hardware architecture, the recommendation is similar but more balanced:
+keep improving raster, texture, and ray traversal enough to feed accurate
+prefill frames, but put the speculative DLSS-5-class upside into tensor
+throughput, low-latency cache residency, sparse/tiled feature lookup, fast
+quantized feature storage, and synchronization between graphics and compute.
+A Gaussian-aware cache is not literally an LLM KV cache, but it plays an
+analogous role: expensive evidence is encoded once, then many decode queries
+reuse compact keys, values, confidence, visibility, and motion features.
+
+A concrete cache layout for experiments is:
+
+\[
+  \mathcal{C}_t =
+  (\texttt{tile\_ranges},\texttt{gaussian\_indices},K_t,V_t,M_t),
+\]
+
+where $K_t\in\mathbb{R}^{T\times B_t\times K_a}$ stores per-tile keys,
+$V_t\in\mathbb{R}^{T\times B_t\times K_v}$ stores projected Gaussian/radiance
+values, $M_t$ stores masks, depth ranges, IDs, and confidence, $T$ is the
+number of tiles, and $B_t$ is a capped per-tile cache budget. Decode then
+queries only the local tile and neighbor tiles, not the entire Gaussian set.
+
+The pass/fail experiments should be:
+
+\begin{enumerate}
+  \item \textbf{Prefill amortization:} compare monolithic update+resolve against
+        prefill once plus 1, 2, 4, and 6 decodes. Report $T_{avg}(q)$,
+        cache memory, ghosting, and disocclusion error.
+  \item \textbf{Cache quantization:} compare fp32, fp16, fp8/int8-like cached
+        features for $K_t,V_t$ at fixed quality.
+  \item \textbf{KV-cache ablation:} decode from raw projected Gaussians, from
+        tile feature caches, and from a small transformer with cached keys and
+        values.
+  \item \textbf{Partial refresh:} invalidate only tiles/primitives with large
+        disocclusion or motion residuals and measure whether quality recovers
+        without full prefill.
+\end{enumerate}
+
+The decision rule is: invest more in tensor/KV-cache optimization if prefill
+amortization gives at least $2\times$--$4\times$ displayed-frame throughput at
+acceptable temporal error, and if cache memory stays within the $N,K$ budgets
+above. If decode quality collapses without frequent full prefill, invest more
+in acquisition and motion/visibility hardware instead.
+
+\subsection{Reusing KV-Cache Optimization for Gaussian Radiance Cache}
+
+KV-cache hardware and software optimization is directly relevant to vkGSplat,
+but the reuse is architectural rather than literal. LLM inference caches keys
+and values for previously processed tokens so repeated decode steps avoid
+recomputing the prefix. A Gaussian radiance cache should cache spatial,
+visibility-aware keys and radiance/history values so repeated TAA/SR/framegen
+decodes avoid re-querying or re-updating the entire Gaussian state.
+
+\begin{center}
+\small
+\begin{tabular}{p{0.22\linewidth}p{0.34\linewidth}p{0.30\linewidth}}
+\toprule
+LLM KV cache & Gaussian radiance cache & Reusable idea \\
+\midrule
+Token position & tile/cell/Gaussian address & logical-to-physical block map \\
+Key vector & position, normal, depth, ID, motion, confidence & query-key scoring \\
+Value vector & radiance, SH/lobe moments, variance, age & cached decode payload \\
+Prefix reuse & static or slow scene regions & sharing across generated frames \\
+Paged blocks & tile/Gaussian pages & low-fragmentation dynamic allocation \\
+KV quantization & radiance/feature quantization & bandwidth and residency reduction \\
+Copy-on-write & page update on visibility/material change & sparse refresh \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PagedAttention shows that dynamic KV caches benefit from block paging, reduced
+fragmentation, and flexible sharing across requests \cite{kwon2023pagedattention}.
+vAttention argues for retaining contiguous virtual memory while allocating
+physical memory on demand, avoiding kernel complexity caused by explicitly
+paged layouts \cite{prabhu2025vattention}. vkGSplat should test both ideas in
+Gaussian form: explicit block tables are easier to prototype and inspect, while
+contiguous virtual addressing may be better if CUDA virtual-memory APIs keep
+kernels simpler.
+
+A Gaussian radiance page should have a logical address
+
+\[
+  a = (tile, depth\_layer, primitive\_group, material\_group, epoch),
+\]
+
+and a physical page containing a capped number $B_p$ of cache records:
+
+\[
+  \mathcal{P}_a =
+  (K_a,V_a,M_a,E_a),
+\]
+
+where
+
+\[
+\begin{aligned}
+  K_a &\in \mathbb{R}^{B_p\times K_{key}},\\
+  V_a &\in \mathbb{R}^{B_p\times K_{val}},\\
+  M_a &\in \mathbb{Z}^{B_p\times K_{meta}},\\
+  E_a &\in \mathbb{R}^{B_p\times K_{err}}.
+\end{aligned}
+\]
+
+The key tensor should include compact geometry and identity features:
+position relative to tile, depth range, normal cone, primitive/material ID
+hashes, velocity, confidence, and visibility age. The value tensor should store
+radiance and reconstruction payloads: RGB or SH coefficients, indirect-radiance
+moments, lobe/roughness bins, variance, temporal confidence, and optional
+neural features. The error tensor stores residual statistics used for eviction,
+refresh, and quantization health.
+
+The decode query becomes local attention or local compatibility over a small
+set of pages:
+
+\[
+  \hat L(q)=
+  \sum_{a\in\mathcal{N}(tile(q))}\sum_{j\in\mathcal{P}_a}
+  \mathrm{softmax}_j\left(\frac{\phi(q)^\top K_{a,j}}{\sqrt{K_{key}}}
+  -\lambda_d\Delta d-\lambda_n\Delta n-\lambda_{id}\Delta id\right)V_{a,j}.
+\]
+
+The hard visibility and identity gates remain outside the softmax. This is a
+major difference from LLM KV cache: wrong reuse in text usually changes token
+probability smoothly; wrong reuse in rendering creates obvious ghosting,
+light leaks, and depth-edge errors. Therefore the page table must be
+geometry-aware:
+
+\begin{itemize}
+  \item \textbf{Hard invalidation:} primitive/material mismatch, large depth
+        residual, disocclusion, or topology epoch mismatch invalidates records.
+  \item \textbf{Soft decay:} occlusion age, variance, and motion residual lower
+        confidence without immediately freeing the page.
+  \item \textbf{Copy-on-write:} static shared pages can serve multiple decode
+        outputs until a prefill update touches their primitive/tile group.
+  \item \textbf{Motion prefetch:} tile pages are prefetched along screen-space
+        and Gaussian velocities for frame interpolation.
+\end{itemize}
+
+Quantization should be asymmetric. Geometry, depth bounds, primitive identity,
+and confidence should stay fp16/fp32 or integer-exact until experiments prove
+otherwise. Radiance values, SH/lobe features, and neural features are better
+candidates for fp16, fp8, int8, or product/vector quantization. The right first
+experiment is not maximum compression; it is measuring when quantized cached
+radiance begins to cause visible flicker, color bias, or light leakage:
+
+\[
+  Q_{safe} = \min_Q
+  \{\mathrm{bytes}(Q):\Delta E_{temporal}<\epsilon_t,
+                    \Delta E_{edge}<\epsilon_e,
+                    \Delta E_{radiance}<\epsilon_L\}.
+\]
+
+The CUDA kernels implied by this design are:
+
+\begin{enumerate}
+  \item \texttt{BuildRadiancePageKeys}: write page keys from active Gaussians,
+        tile lists, depth ranges, and primitive/material groups.
+  \item \texttt{AllocateRadiancePages}: allocate physical pages from a device
+        pool using a block table or virtual-memory-backed allocator.
+  \item \texttt{ScatterRadianceValues}: write radiance, variance, confidence,
+        and optional neural values into page-local SoA tensors.
+  \item \texttt{DecodeRadiancePages}: query local pages during TAA/SR/framegen
+        resolve using hard gates plus local key-value scoring.
+  \item \texttt{InvalidateRadiancePages}: clear or decay pages after
+        disocclusion, primitive change, or large residual error.
+  \item \texttt{QuantizeRadiancePages}: pack stable value pages to fp8/int8-like
+        formats and leave unstable pages at higher precision.
+\end{enumerate}
+
+This section turns the hardware question into a concrete vkGSplat thesis:
+
+\begin{quote}
+The reusable hardware idea is not ``attention for everything.'' It is paged,
+quantized, high-residency, queryable state for repeated decode. Gaussian
+radiance cache is the graphics analogue of KV cache, with geometry-aware
+invalidation added.
+\end{quote}
+
+The pass/fail experiments are:
+
+\begin{enumerate}
+  \item \textbf{Paged vs contiguous cache:} compare explicit page tables,
+        contiguous virtual allocation, and simple flat arrays. Report page
+        waste, allocator time, decode time, and kernel complexity.
+  \item \textbf{Radiance-cache quantization:} fp32/fp16/fp8/int8-like values at
+        fixed $N,K$ and fixed frame sequence. Report temporal flicker,
+        radiance bias, and edge leakage.
+  \item \textbf{KV-style sharing:} reuse static pages across 1, 2, 4, and 6
+        decode outputs. Report copy-on-write rate and stale-page error.
+  \item \textbf{Geometry invalidation:} deliberately introduce disocclusions,
+        moving occluders, animated materials, and thin geometry. The cache
+        passes only if hard gates prevent light leaks and ghost trails.
+\end{enumerate}
+
+The investment decision is positive if block-paged or virtual-memory-backed
+radiance cache reduces memory waste and decode bandwidth without increasing
+visible stale-history artifacts. It is negative if geometry-aware invalidation
+forces so many page refreshes that the system behaves like full prefill every
+frame.
+
+\subsection{CUDA Data Layout and Binning}
+
+The first reconstruction implementation should be CUDA-first, but it should
+not depend on a CUDA acquisition backend existing yet. Recorded seed frames and
+CPU/Metal-produced seed frames are valid inputs as long as they satisfy the
+same device view. Once CUDA acquisition exists, it can alias or write those
+buffers directly without changing the reconstruction kernels.
+
+Avoid a global nearest-neighbor search. Use a GPU-built hashed grid keyed by
+quantized position plus primitive ID:
+
+\[
+  h(x,id) =
+  (\lfloor x_x / h_c \rfloor,
+   \lfloor x_y / h_c \rfloor,
+   \lfloor x_z / h_c \rfloor,
+   id).
+\]
+
+For each sample, search the cell and its 26 neighbors. Cap candidates per cell:
+
+\[
+  |B_h| \le B_{max}.
+\]
+
+If a cell overflows, reject low-confidence Gaussians first. If overflow
+persists, split the cell by primitive ID or material ID. The data layout should
+be structure-of-arrays so projection and update kernels can coalesce loads:
+
+\[
+  G =
+  (\mu_x,\mu_y,\mu_z,\Sigma_0,\ldots,\Sigma_5,
+   c_x,c_y,c_z,\nu,v,m,id_{prim},id_{mat},cell).
+\]
+
+The CUDA staging buffers are:
+
+\begin{itemize}
+  \item \textbf{sample buffers:} one entry per seed pixel/path event,
+  \item \textbf{cell counts:} atomically incremented during binning,
+  \item \textbf{cell offsets:} prefix-summed with CUB or an equivalent scan,
+  \item \textbf{cell members:} compact Gaussian indices sorted or grouped by
+        cell,
+  \item \textbf{tile lists:} projected Gaussian ranges for TAA/SR/framegen,
+  \item \textbf{debug counters:} gate rejections, atomics, overflows, clamps,
+        prunes, and stale-history energy.
+\end{itemize}
+
+The prototype should measure atomics and memory traffic from the beginning.
+The research question is not only whether the equations work; it is whether
+the shared state maps naturally to CUDA.
+
+\subsection{CUDA Hash Grid Build}
+
+Build the hash grid with a standard count/scan/scatter pipeline:
+
+\begin{enumerate}
+  \item \texttt{ComputeCellKeys}: one thread per Gaussian computes
+        $h(\mu_j,id_j)$ and writes a compact cell key.
+  \item \texttt{CountCells}: atomically increments a cell count.
+  \item \texttt{ExclusiveScan}: converts counts to cell offsets.
+  \item \texttt{ScatterCellMembers}: writes Gaussian indices into
+        \texttt{cell\_members}.
+  \item \texttt{ClampOverflow}: marks excess low-confidence members for prune,
+        split, or delayed update.
+\end{enumerate}
+
+The per-cell occupancy distribution is a first-order performance signal:
+
+\[
+  \bar{B}=\frac{1}{N_c}\sum_h |B_h|,
+  \qquad
+  B_{p99}=\mathrm{percentile}_{99}(|B_h|).
+\]
+
+The method is healthy only if $B_{p99}$ stays bounded under camera motion and
+moderate scene complexity. If a few cells dominate, assignment becomes
+divergent and tile projection develops long-tail latency.
+
+\subsection{CUDA Assignment and Update Strategy}
+
+Avoid updating Gaussian state directly from sample threads when possible. The
+simple atomic path is useful for M0, but the intended CUDA path is two-stage:
+sample-parallel assignment followed by Gaussian-parallel reduction.
+
+Sample assignment writes:
+
+\[
+  A_i=(j_i^*, W_{ij_i^*}, x_i,c_i,L_i,n_i,u_i,\rho_i).
+\]
+
+Then reduce by Gaussian ID:
+
+\[
+  S_j = \sum_{i:j_i^*=j} W_{ij},
+  \qquad
+  X_j = \sum_{i:j_i^*=j} W_{ij}x_i,
+  \qquad
+  C_j = \sum_{i:j_i^*=j} W_{ij}c_i.
+\]
+
+The update kernel becomes one thread block or warp group per active Gaussian:
+
+\[
+  \mu_j' =
+  \frac{m_j\mu_j+X_j}{m_j+S_j+\epsilon},
+  \qquad
+  c_j' =
+  \frac{m_jc_j+C_j}{m_j+S_j+\epsilon}.
+\]
+
+Radiance, velocity, and variance use the same reduced sums. This avoids many
+floating-point atomics to the same Gaussian and makes update cost depend on
+active Gaussians rather than raw samples. The first implementation can keep a
+compile-time switch:
+
+\begin{itemize}
+  \item \textbf{atomic update path:} fastest to implement, useful for small
+        scenes and debugging,
+  \item \textbf{reduced update path:} intended performance path, using sorted
+        assignments or bucketed per-cell reductions.
+\end{itemize}
+
+The experiment should report both. If the reduced path is required for quality
+because atomics create unstable history, that is acceptable. If it is required
+but too expensive, the shared-state CUDA design needs a different addressing
+scheme.
+
+\subsection{CUDA Spawn, Prune, Split, and Merge}
+
+Spawning should be queue-based:
+
+\[
+  q_i =
+  \begin{cases}
+  1, & W_{ij^*}<\epsilon_W,\\
+  0, & \text{otherwise}.
+  \end{cases}
+\]
+
+Prefix-sum $q_i$ to allocate new Gaussian slots from a device free list:
+
+\[
+  j_{new}=F[\mathrm{atomicAdd}(F_{head},1)].
+\]
+
+Pruning writes dead Gaussian indices back to the free list:
+
+\[
+  dead_j =
+  [\nu_j < \epsilon_\nu]\lor[t-\tau_j>T_{max}].
+\]
+
+Split and merge should be separate compaction passes, not mixed into the
+sample update kernel. Split high-variance Gaussians by emitting two children
+along the largest tangent eigenvector:
+
+\[
+  \mu_{j\pm}=\mu_j\pm \kappa\sqrt{\lambda_{max}}e_{max},
+  \qquad
+  \Sigma_{j\pm}=\eta_{split}\Sigma_j.
+\]
+
+Merge is a low-frequency maintenance pass over local cells. The CUDA kill
+condition is simple: if split/merge must run every frame to avoid blur or
+explosive memory growth, the state representation is too fragile.
+
+\subsection{Tile List Construction and Reuse}
+
+Projection should use one tile list for all image-space consumers. For each
+Gaussian, compute its projected ellipse and conservative bounding box:
+
+\[
+  B_j =
+  [p_j-r_j, p_j+r_j],
+  \qquad
+  r_j = k_\sigma
+  \sqrt{\lambda_{max}(\Sigma_{screen,j})}.
+\]
+
+The tile coverage is:
+
+\[
+  T_j =
+  \{\,\tau : \tau \cap B_j \neq \emptyset\,\}.
+\]
+
+Build tile lists with count/scan/scatter, mirroring the hash-grid build:
+
+\[
+  count_\tau = \sum_j [\tau \in T_j].
+\]
+
+Then TAA, SR, feature projection, and frame generation consume the same
+\texttt{tile\_members}. The consumers differ only in output resolution,
+confidence gates, and payload channels. A block-per-tile projection kernel can
+load a chunk of Gaussian indices into shared memory, evaluate per-pixel
+weights, and accumulate:
+
+\[
+  O_p =
+  \frac{\sum_{j\in tile(p)} a_{pj} y_j}
+       {\sum_{j\in tile(p)} a_{pj}+\epsilon}.
+\]
+
+The crucial CUDA measurement is tile reuse:
+
+\[
+  R_{tile}=
+  \frac{N_{consumers}\,N_{tile\_members}}
+       {N_{tile\_members}+N_{extra\_members}}.
+\]
+
+If $R_{tile}$ is close to one, the shared state is not buying much. If it is
+large and quality remains stable, vkGSplat has a concrete integration win.
+
+\subsection{Persistent State Versioning}
+
+Frame interpolation and temporal reconstruction need more than one state view.
+Maintain a ring buffer for compact motion-critical fields:
+
+\[
+  G_j^{hist}(r) =
+  (\mu_j^r,\Sigma_j^r,c_j^r,\nu_j^r,\tau_j^r),
+  \qquad
+  r=t\bmod R.
+\]
+
+The full radiance/path payload can stay single-buffered unless a path-space
+experiment needs old values. The CUDA memory rule is:
+
+\[
+  M_{history} =
+  R\,M_{motion\_core} + M_{payload}.
+\]
+
+This is cheaper than duplicating the entire Gaussian state for TAA, SR, and
+frame generation. It also gives frame generation a clean source for
+$G_j(t_0)$ and $G_j(t_1)$ without keeping separate motion caches.
+
+\subsection{Default Prototype Parameters}
+
+The first demo should use explicit conservative defaults:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Parameter & Initial value & Purpose \\
+\midrule
+$\epsilon_W$ & $0.05$ & spawn threshold \\
+$\epsilon_d$ & $10^{-3}$--$10^{-2}$ & depth gate \\
+$\gamma_n$ & $8$ & normal sharpness \\
+$\eta_{id}$ & $0$ & hard primitive rejection \\
+$\lambda_{occ}$ & $0.98$ & slow occlusion decay \\
+$\lambda_{dis}$ & $0.2$ & fast stale-history decay \\
+$\lambda_{frustum}$ & $0.995$ & preserve offscreen state briefly \\
+$m_{split}$ & $32$ & split mass threshold \\
+$v_{split}$ & scene-dependent & split variance threshold \\
+$B_{max}$ & $8$--$16$ & max Gaussians per hash cell \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+These values are not claims. They are a reproducibility anchor so vkGSplat can
+compare changes without silently moving the target.
+
+\subsection{Algorithm Summary}
+
+\begin{verbatim}
+for each frame t:
+    seed = acquire_seed_frame(t)  // CPU, Metal, CUDA RT/raster, or 3DGS
+    upload_or_alias_seed_buffers(seed)
+
+    launch ExtractSamples(seed, sample_buffers)
+    launch UpdateVisibility(gaussians, seed.depth, seed.primitive_id)
+    launch ComputeCellKeys(gaussians, cell_keys)
+    launch CountCells(cell_keys, cell_counts)
+    scan cell_counts -> cell_offsets
+    launch ScatterCellMembers(cell_keys, cell_offsets, cell_members)
+
+    launch AssignSamples(sample_buffers, cell_members, assignments, spawn_flags)
+    scan spawn_flags -> spawn_offsets
+    launch SpawnGaussians(spawn_offsets, free_list, gaussians)
+
+    if use_reduced_update:
+        sort_or_bucket assignments by gaussian_id
+        launch ReduceAssignments(assignments, gaussian_deltas)
+        launch ApplyGaussianDeltas(gaussian_deltas, gaussians)
+    else:
+        launch AtomicUpdateGaussians(assignments, gaussians)
+
+    launch PruneAndCompactIfNeeded(gaussians, free_list)
+    launch SplitOrMergeMaintenanceIfScheduled(gaussians)
+
+    launch BuildTileLists(gaussians, camera_t, tile_members)
+    launch ProjectTAA(tile_members, gaussians, taa_frame)
+    launch ProjectSR(tile_members, gaussians, sr_frame)
+    launch ProjectFeatures(tile_members, gaussians, features)
+
+    if path_tracing:
+        launch QueryRadiance(gaussians, path_queries)
+        launch UpdatePathSubslots(path_events, gaussians)
+
+    if interpolation:
+        launch SynthesizeGenerated(tile_members, gaussians, alpha, framegen_out)
+\end{verbatim}
+
+\subsection{CUDA Kernel Decomposition}
+
+The CUDA prototype should be decomposed into explicit kernels so each
+mathematical claim maps to a launch, a memory access pattern, and a measurable
+cost:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+CUDA kernel & Input & Output & Main risk \\
+\midrule
+ExtractSamples & seed frame & $S_t$ & bandwidth \\
+BinGaussians & $G_j$ & cell lists & atomics \\
+AssignSamples & $S_t$, cells & assignments & divergence \\
+UpdateMoments & assignments & updated $G_j$ & write conflicts \\
+UpdateVisibility & depth, IDs & $\ell_j^t,\nu_j$ & false stale kills \\
+BuildTileLists & projected $G_j$ & tile ranges & overdraw \\
+ProjectTAA & tile lists & history/confidence & depth leaks \\
+ProjectSR & tile lists, scale & high-res resolve & bandwidth \\
+QueryRadiance & path events & $\hat{L}^k$ & incoherent reads \\
+UpdatePathSubslots & assignments & $A_j^{path}$ & noisy atomics \\
+SynthesizeFrame & $G_j^\alpha$ & generated frame & holes \\
+ProjectFeatures & tile lists & feature planes & channel cost \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The CUDA kernels should be deterministic for fixed input where possible, but
+perfect CPU-like determinism is not the objective. The objective is to expose
+where the unified Gaussian state pays for itself on the GPU: fewer duplicated
+history buffers, fewer independent passes, reusable tile lists, and shared
+confidence/visibility logic.
+
+\subsection{CUDA Scheduling}
+
+The preferred frame schedule is:
+
+\begin{enumerate}
+  \item seed frame and auxiliary buffers are produced by any acquisition
+        backend that satisfies the seed ABI,
+  \item \texttt{ExtractSamples} writes a compact sample stream,
+  \item \texttt{UpdateVisibility} marks visible/occluded/stale Gaussians,
+  \item \texttt{BinGaussians} and \texttt{AssignSamples} update the persistent
+        state,
+  \item \texttt{BuildTileLists} constructs one projection structure,
+  \item TAA, SR, feature projection, and frame generation consume the same tile
+        lists,
+  \item radiance queries update path subslots asynchronously when path tracing
+        samples are available.
+\end{enumerate}
+
+This schedule is the real integration claim. If TAA, SR, radiance, and frame
+generation require separate binning/projection structures, then 3DGS remains a
+collection of useful tricks rather than vkGSplat's central CUDA abstraction. If
+they require a specific acquisition renderer, the software stack has failed at
+an even earlier boundary.
+
+\subsection{Task-to-Experiment Map}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Task & Equation family & First experiment & Failure signal \\
+\midrule
+TAA & $H_t,\beta_p$ & Exp. 1 & shimmer or ghosting \\
+2x/4x SR & $O_t^{SR}$ & Exp. 1 & blur or scale-specific state \\
+Denoising & $F_L,V_L$ & Exp. 2 & variance unchanged \\
+Radiance cache & $\hat{L}^k$ & Exp. 2 & light leaking \\
+Path-space CV & $\hat{I}_{CV}$ & Exp. 2 & bias exceeds variance gain \\
+Interpolation & $\mu^\alpha,\nu^\alpha$ & Exp. 3 & silhouette error \\
+Frame generation & $H_{\alpha},E_{FG}$ & Exp. 3 & confident holes \\
+Neural resolve & $\Phi_t,N_\theta$ & Exp. 4 & features ignored \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This table is the falsifiability guardrail. If an equation does not land in an
+experiment, it should not be in the first implementation.
+
+\section{Feature Integration}
+
+\subsection{Monte Carlo Denoising and Radiance Caching}
+
+Use path samples to update radiance-bearing Gaussian levels:
+
+\begin{itemize}
+  \item level 0: directly visible surface evidence,
+  \item level 1: first-bounce diffuse or rough indirect radiance,
+  \item level 2: deeper low-frequency residual,
+  \item residual level: optional control-variate correction.
+\end{itemize}
+
+The cache is queried during low-spp rendering and also projected as a denoising
+feature. This tests whether radiance history and image history can be one
+state.
+
+\subsection{Temporal AA}
+
+The Gaussian state acts as a world-space history buffer. Instead of sampling
+previous-frame pixels, the current frame projects persistent Gaussians into the
+current camera and accepts them only when depth, primitive ID, normal, velocity,
+and confidence agree.
+
+\subsection{Temporal Super-Resolution}
+
+Jittered low-resolution samples update Gaussian footprints. The output image is
+resolved at target resolution by splatting projected footprints. The key
+question is whether the state preserves subpixel evidence better than a
+well-clamped image-space TAAU baseline.
+
+\subsection{Motion-Accurate Frame Interpolation}
+
+For interpolation between $t_0$ and $t_1$, evaluate each moving Gaussian at
+$t_\alpha$:
+
+\[
+  \mu_j(t_\alpha) =
+  (1-\alpha)\mu_j(t_0) + \alpha\mu_j(t_1)
+\]
+
+for the first prototype. Later versions use object transforms, splines,
+Kalman-style prediction/correction, or flow-guided residuals. Motion is trusted
+only when projected forward/backward residuals are small:
+
+\[
+  e_j =
+  \left\|\Pi_{t_1}(\mu_j(t_1)) -
+  \left(\Pi_{t_0}(\mu_j(t_0)) + u_{0\rightarrow1}\right)\right\|.
+\]
+
+This is stronger than plausible frame generation: the midpoint should align
+with a true rendered middle frame.
+
+\subsection{Hybrid Learned Resolver}
+
+A small neural resolver is optional later work. It can consume both normal
+engine buffers and Gaussian features:
+
+\[
+  \text{low-res frame} + \text{engine buffers} + \text{Gaussian features}
+  \rightarrow
+  \text{reconstructed frame}.
+\]
+
+This does not replace the explicit state, and it is not required for the core
+framework. It tests whether the explicit state reduces the amount of learning
+needed.
+
+\section{What Can Approach DLSS 4.5 or DLSS 5}
+
+Likely approachable in vkGSplat:
+
+\begin{itemize}
+  \item improved temporal stability over naive reprojection,
+  \item 2x temporal SR for controlled scenes,
+  \item motion-accurate midpoint interpolation for rigid camera/object motion,
+  \item radiance-cache-assisted diffuse indirect reconstruction,
+  \item explicit world-space conditioning for a later optional neural
+        lighting/material residual,
+  \item a hybrid neural resolver that uses Gaussian features, if the
+        no-training core already shows signal.
+\end{itemize}
+
+Not likely approachable soon:
+
+\begin{itemize}
+  \item generic per-game DLSS 4.5 product quality,
+  \item DLSS 5 photoreal material/lighting synthesis without a large trained
+        model, art controls, and production validation,
+  \item robust multi-frame generation for particles, UI, transparency, and
+        specular shading without an image-space learned residual,
+  \item DLSS-class latency integration without Reflex-like scheduling,
+  \item parity with proprietary NVIDIA training and validation infrastructure.
+\end{itemize}
+
+The useful vkGSplat question is therefore not ``can 3DGS replace DLSS?'' It is:
+can an explicit Gaussian state provide a better conditioning signal than color,
+depth, motion vectors, and exposure alone? If yes, vkGSplat becomes a plausible
+open research route toward a DLSS-class stack: analytic Gaussian history first,
+then, only if useful, a small neural residual that receives projected Gaussian
+features.
+
+\section{Metrics and Pass/Fail Rules}
+
+The experiments should not rely on visual inspection alone. The shared-state
+hypothesis needs a scorecard that measures quality, stability, integration, and
+cost.
+
+\subsection{Image and Temporal Error}
+
+Reference error:
+
+\[
+  E_{ref} =
+  \frac{1}{|\Omega|}
+  \sum_{p\in\Omega}
+  \|O_t(p)-R_t(p)\|_2^2.
+\]
+
+Temporal instability after reprojection:
+
+\[
+  E_{temp} =
+  \frac{1}{|\Omega_v|}
+  \sum_{p\in\Omega_v}
+  \|O_t(p)-O_{t-1}(p+u_{t\rightarrow t-1})\|_1.
+\]
+
+Disoccluded pixels are excluded from $\Omega_v$ and scored separately.
+
+\subsection{Ghosting and Disocclusion}
+
+Given a ground-truth or depth/primitive-derived disocclusion mask $D_t(p)$,
+ghosting error is:
+
+\[
+  E_{ghost} =
+  \frac{1}{|D_t|}
+  \sum_{p:D_t(p)=1}
+  \|O_t(p)-C_t(p)\|_1.
+\]
+
+This penalizes stale history in newly revealed regions. A Gaussian method that
+improves PSNR but raises $E_{ghost}$ is not acceptable for the first demo.
+
+\subsection{Interpolation Accuracy}
+
+For midpoint interpolation, compare against a true rendered middle frame:
+
+\[
+  E_{mid} =
+  \frac{1}{|\Omega|}
+  \sum_p
+  \|O_{t+\frac{1}{2}}^{gen}(p)-R_{t+\frac{1}{2}}(p)\|_2^2.
+\]
+
+Silhouette error uses depth or primitive masks:
+
+\[
+  E_{sil} =
+  1 -
+  \frac{|S_{gen}\cap S_{ref}|}{|S_{gen}\cup S_{ref}|}.
+\]
+
+The midpoint is motion-accurate only if both $E_{mid}$ and $E_{sil}$ improve
+over image blending and screen-space reprojection.
+
+\subsection{Integration Score}
+
+Define a normalized per-feature improvement over the image-space baseline:
+
+\[
+  I_f =
+  \frac{E_f^{baseline}-E_f^{method}}
+       {E_f^{baseline}+\epsilon}.
+\]
+
+For features $f\in\{\mathrm{TAA},\mathrm{SR},\mathrm{Denoise},\mathrm{Interp}\}$:
+
+\[
+  I_{shared} =
+  \frac{1}{4}\sum_f I_f
+  - \lambda_C\frac{C_{method}}{C_{baseline}}
+  - \lambda_M\frac{M_{method}}{M_{baseline}}.
+\]
+
+The shared Gaussian state passes the integration test if:
+
+\begin{itemize}
+  \item at least three of four $I_f$ are positive,
+  \item no ghosting metric regresses by more than 10\%,
+  \item shared-state cost is below separate-Gaussian cost,
+  \item shared-state memory is within 1.5x of the image-space baseline for the
+        first CUDA demo, or clearly on a path to that bound.
+\end{itemize}
+
+\section{Decisive Experiments}
+
+\subsection{Experiment 0: Baseline Reconstruction Stack}
+
+\textbf{Purpose.} Establish honest non-Gaussian baselines.
+
+\textbf{Inputs.} Low-spp or low-resolution seed frames with color, depth, NDC
+depth, primitive ID, camera matrices, jitter, and optional motion vectors.
+
+\textbf{Baselines.}
+
+\begin{itemize}
+  \item current vkGSplat reprojection,
+  \item TAA with neighborhood clamp,
+  \item TAAU 2x with jitter,
+  \item SVGF-style denoising,
+  \item optical-flow interpolation if available.
+\end{itemize}
+
+\textbf{Metrics.} PSNR, SSIM, temporal difference, edge shimmer, ghosting after
+disocclusion, silhouette error, runtime, and memory.
+
+\textbf{Expected signal.} This defines the bar. Gaussian results are meaningful
+only if these baselines are not straw men.
+
+\subsection{Experiment 1: Single Gaussian State, Multiple Outputs}
+
+\textbf{Purpose.} Demonstrate integration directly.
+
+\textbf{Scene.} Static Cornell-style scene with thin geometry, textured
+surfaces, camera jitter, and slow camera pan.
+
+\textbf{Method.} Build one Gaussian state from visible samples. Use that same
+state to produce:
+
+\begin{itemize}
+  \item TAA history,
+  \item 2x super-resolution resolve,
+  \item variance/confidence feature frame,
+  \item disocclusion mask.
+\end{itemize}
+
+\textbf{Baselines.}
+
+\begin{itemize}
+  \item separate image-space TAA plus TAAU,
+  \item Gaussian TAA only,
+  \item Gaussian SR only,
+  \item shared Gaussian state for both.
+\end{itemize}
+
+\textbf{Metrics.}
+
+\begin{itemize}
+  \item TAA shimmer reduction,
+  \item SR reference error,
+  \item ghosting score,
+  \item number of duplicated state buffers,
+  \item update/query cost.
+\end{itemize}
+
+\textbf{Expected success.} The shared Gaussian state performs within 5--10\%
+of specialized per-feature Gaussian variants while beating image-space history
+on shimmer or disocclusion.
+
+\textbf{Failure case.} If each feature requires incompatible covariance,
+confidence, or filtering rules, 3DGS is not a clean integration layer.
+
+\subsection{Experiment 2: Gaussian Radiance Cache Plus TAA}
+
+\textbf{Purpose.} Test whether lighting history and image history can share
+the same Gaussian state.
+
+\textbf{Scene.} Diffuse Cornell box plus one rough glossy variant.
+
+\textbf{Method.} Add path sample logging. Store level-1 indirect radiance in
+the same Gaussian entries or in path-depth subslots attached to the same entry.
+Project color history for TAA and query indirect radiance for low-spp shading.
+
+\textbf{Baselines.}
+
+\begin{itemize}
+  \item path tracing plus SVGF,
+  \item Gaussian TAA without radiance cache,
+  \item separate radiance cache plus separate TAA history,
+  \item unified Gaussian state with color and radiance subslots.
+\end{itemize}
+
+\textbf{Metrics.} Indirect-light MSE, variance at fixed spp, temporal stability,
+light leaking, stale lighting after light changes, runtime, and memory.
+
+\textbf{Expected success.} Unified state reduces variance and temporal shimmer
+without requiring a separate cache structure.
+
+\textbf{Failure case.} Radiance and color history need different support sizes
+or gating so strongly that they should not be one state.
+
+\subsection{Experiment 3: Motion-Accurate Midpoint From Same State}
+
+\textbf{Purpose.} Test whether the temporal/SR state can also drive frame
+interpolation.
+
+\textbf{Scene.} Render $t_0$, $t_{0.5}$, and $t_1$ for:
+
+\begin{itemize}
+  \item camera-only motion,
+  \item one rigid moving object,
+  \item one simple deforming object.
+\end{itemize}
+
+\textbf{Method.} Hide $t_{0.5}$. Use Gaussian motion state to synthesize the
+midpoint. Compare against the true middle frame.
+
+\textbf{Baselines.}
+
+\begin{itemize}
+  \item frame hold,
+  \item linear image blend,
+  \item screen-space reprojection,
+  \item optical-flow interpolation if available.
+\end{itemize}
+
+\textbf{Metrics.} Midpoint PSNR/SSIM, silhouette distance, depth-edge alignment,
+occlusion error, flow residual, and temporal flicker across $t_0$, generated
+$t_{0.5}$, $t_1$.
+
+\textbf{Expected success.} Rigid and camera-motion midpoint silhouettes land
+closer to ground truth than screen-space methods.
+
+\textbf{Failure case.} Disoccluded background and non-rigid motion require a
+separate residual system, weakening the integration thesis.
+
+\subsection{Experiment 4: Unified State vs Separate State Ablation}
+
+\textbf{Purpose.} Directly answer whether 3DGS integrates features well.
+
+\textbf{Variants.}
+
+\begin{itemize}
+  \item image-space-only stack,
+  \item separate Gaussian state per feature,
+  \item one shared Gaussian state with task-specific subslots,
+  \item one shared Gaussian state plus small neural resolver.
+\end{itemize}
+
+\textbf{Scorecard.}
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Variant & TAA & SR & Denoise & Interp & Cost \\
+\midrule
+Image-space only & ? & ? & ? & ? & ? \\
+Separate Gaussians & ? & ? & ? & ? & ? \\
+Shared Gaussian state & ? & ? & ? & ? & ? \\
+Shared state + neural resolver & ? & ? & ? & ? & ? \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Decision rule.} The shared Gaussian state is a good integration layer
+if it wins on at least three of four quality axes while keeping memory/runtime
+within roughly 1.5x of the image-space baseline or below the separate-Gaussian
+variant.
+
+\textbf{Ablation protocol.} Keep sample inputs, camera jitter, references, and
+post-filters identical. Only change the reconstruction state:
+
+\begin{enumerate}
+  \item \textbf{Image-space only:} color/depth/velocity history, no Gaussians.
+  \item \textbf{Separate Gaussians:} one Gaussian cache for TAA/SR, one for
+        radiance, one for interpolation.
+  \item \textbf{Shared Gaussians:} one state with task-specific subslots.
+  \item \textbf{Shared plus neural:} same shared state, plus equal-size neural
+        residual model.
+\end{enumerate}
+
+The separate-Gaussian variant is important. If it beats the shared state by a
+large margin, then 3DGS may still be useful, but not as the unifying vkGSplat
+abstraction.
+
+\subsection{Experiment 5: Downstream Synthetic Data Utility}
+
+\textbf{Purpose.} Test whether reconstruction quality matters for vkGSplat's
+synthetic-data goal.
+
+\textbf{Method.} Generate a small robotics/perception dataset with:
+
+\begin{itemize}
+  \item noisy low-spp images,
+  \item image-space denoised/TAAU images,
+  \item unified Gaussian reconstructed images,
+  \item high-spp/high-res references.
+\end{itemize}
+
+\textbf{Metrics.} Downstream detection/segmentation/pose accuracy, not only
+image PSNR.
+
+\textbf{Expected success.} The Gaussian reconstruction improves downstream
+accuracy or data efficiency relative to noisy and image-space baselines.
+
+\section{CUDA Validation and Microbenchmarks}
+
+The first implementation should be a CUDA prototype with validation and
+microbenchmarks from day one. The tests are wrappers around GPU kernels, not a
+CPU research path. A scalar CPU oracle is useful only for tiny deterministic
+inputs and expected-value checks.
+
+\begin{itemize}
+  \item \textbf{cuda\_extract\_samples:} device kernel unprojects depth,
+        primitive ID, color, and motion into compact sample buffers.
+  \item \textbf{cuda\_bin\_gaussians:} device hash-grid binning reports cell
+        occupancy, overflow rate, atomic pressure, and memory bandwidth.
+  \item \textbf{cuda\_assign\_and\_update:} incompatible primitive, depth,
+        normal, and motion samples do not update the same Gaussian; benchmark
+        branch divergence and update atomics.
+  \item \textbf{cuda\_visibility\_decay:} occluded Gaussians decay slowly while
+        disoccluded stale Gaussians decay quickly on device.
+  \item \textbf{cuda\_project\_taa\_static\_pan:} shared-state TAA reduces
+        temporal error on a jittered pan while reporting tile-list reuse.
+  \item \textbf{cuda\_project\_sr\_scale2\_4:} the same state resolves 2x and
+        4x outputs using only changed projection footprints.
+  \item \textbf{cuda\_radiance\_diffuse:} level-1 diffuse radiance cache
+        reduces variance against a high-spp Cornell reference without crossing
+        primitive boundaries.
+  \item \textbf{cuda\_path\_subslot\_moments:} path-depth/lobe moments update
+        on device and biased mode is separated from residual/control-variate
+        mode.
+  \item \textbf{cuda\_midpoint\_rigid:} midpoint interpolation lands a moving
+        rigid object's silhouette closer to the rendered middle frame than
+        linear image blending.
+  \item \textbf{cuda\_framegen\_holes:} disoccluded generated pixels are marked
+        as holes and do not receive high-confidence Gaussian color.
+  \item \textbf{cuda\_shared\_vs\_separate:} shared-state memory and launch
+        count are lower than separate per-feature Gaussian caches while quality
+        stays within the scorecard threshold.
+\end{itemize}
+
+These benchmarks should use tiny synthetic scenes first, then Wicked/Cornell
+captures once the CUDA contracts are stable. Report timing with CUDA events and
+memory counters, not only image quality.
+
+\section{Implementation Milestones}
+
+\subsection{M0: CUDA State Without New Rendering}
+
+Start with existing vkGSplat frames and fixtures, but implement the Gaussian
+state path as CUDA kernels. Add only device sample extraction, binning,
+assignment/update, visibility, and projection. This avoids confusing
+reconstruction quality with renderer changes while keeping the research pointed
+at the real target: GPU integration.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item CUDA sample extraction matches the small CPU oracle on tiny inputs,
+  \item hash-grid binning has bounded overflow and measurable atomic cost,
+  \item visibility decay behaves differently for occlusion and disocclusion,
+  \item all kernels expose timing, bandwidth, and debug counters.
+\end{itemize}
+
+\subsection{M1: Shared-State TAA}
+
+Implement only $C_j$ and $A_j^{taa}$. Use static camera-pan clips with jitter.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item temporal error improves over current reprojection,
+  \item ghosting does not regress by more than 10\%,
+  \item stale history disappears in disoccluded regions within two frames,
+  \item TAA projection reuses the same CUDA tile/binning data intended for SR.
+\end{itemize}
+
+\subsection{M2: Same State, 2x/4x SR}
+
+Add $A_j^{sr}$ but keep the same shared core $C_j$. The only scale-specific
+change should be the projection footprint.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item 2x SR beats bilinear and screen-space TAAU on thin geometry,
+  \item 4x SR does not require a second Gaussian cache,
+  \item blur is bounded by an edge-width metric against high-res reference,
+  \item CUDA projection cost scales with output pixels and tile occupancy, not
+        by rebuilding the Gaussian state.
+\end{itemize}
+
+\subsection{M3: Radiance Subslot}
+
+Add $A_j^{rad}$ for level-1 diffuse/rough indirect radiance. Keep direct light
+sampled normally.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item variance drops at fixed spp,
+  \item light leaking across primitive/depth boundaries stays below baseline
+        denoiser artifacts,
+  \item TAA/SR quality does not degrade when radiance subslots are enabled,
+  \item radiance subslot updates do not dominate frame time through atomics.
+\end{itemize}
+
+\subsection{M4: Motion Subslot}
+
+Add $A_j^{mot}$ and synthesize true midpoint frames for rigid object and
+camera-only motion.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item silhouette IoU beats image blending and screen reprojection,
+  \item flow residual predicts failures,
+  \item disoccluded background is masked rather than hallucinated as confident,
+  \item generated frames reuse Gaussian motion/tile data rather than launching
+        an unrelated image-space interpolation stack.
+\end{itemize}
+
+\subsection{M5: Shared State Plus Neural Residual}
+
+Only after M1--M4 show signal, train a small equal-size resolver with and
+without Gaussian feature planes.
+
+\textbf{Exit criteria:}
+
+\begin{itemize}
+  \item Gaussian features improve error at fixed model size,
+  \item model does not simply learn to ignore $\Phi_t$,
+  \item inference remains a small residual pass, not the whole system.
+\end{itemize}
+
+\section{CUDA Implementation Sketch}
+
+Start with CUDA-facing contracts. Host structs define buffer layout and launch
+configuration; the persistent Gaussian state lives in device structure-of-arrays
+buffers:
+
+\begin{verbatim}
+struct GaussianSampleDeviceView {
+    float3* position;
+    float3* normal;
+    float3* color;
+    float3* radiance;
+    float3* velocity;
+    float2* motion_px;
+    float* depth;
+    float* variance;
+    float* roughness;
+    uint32_t* primitive_id;
+    uint32_t* material_id;
+    uint32_t* path_depth;
+    uint32_t count;
+};
+
+struct PathLobeMoments {
+    float3 mean;
+    float second_moment;
+    float sample_weight;
+    float robust_residual;
+};
+
+struct GaussianStateDeviceView {
+    float3* mean;
+    float4* covariance_0_3;
+    float2* covariance_4_5;
+    float4* rotation;
+    float3* color;
+    float3* radiance_levels[3];
+    PathLobeMoments* path_lobes;
+    float3* velocity;
+    float* variance;
+    float* confidence;
+    float* visibility_age;
+    float* flow_residual_px;
+    uint32_t* primitive_id;
+    uint32_t* material_id;
+    uint32_t* motion_group_id;
+    uint32_t count;
+};
+\end{verbatim}
+
+CUDA launch API:
+
+\begin{verbatim}
+class CudaGaussianReconstructionCache {
+public:
+    void extract_samples_cuda(const SeedFrameDeviceView& seed);
+    void update_visibility_cuda(const DepthIdDeviceView& current);
+    void bin_gaussians_cuda();
+    void assign_and_update_cuda();
+    void build_tile_lists_cuda(const CameraDeviceConstants& camera);
+    void project_taa_cuda(ReconstructionFrameDeviceView out) const;
+    void project_super_resolution_cuda(ReconstructionFrameDeviceView out) const;
+    void query_indirect_cuda(ShadingQueryDeviceView queries) const;
+    void update_path_subslots_cuda(PathEventDeviceView events);
+    void synthesize_generated_cuda(float alpha, FrameDeviceView out) const;
+    void project_features_cuda(FeatureFrameDeviceView out) const;
+};
+\end{verbatim}
+
+The first public C++ API can wrap these launches, but the design should be
+judged by CUDA memory layout, launch count, and tile-list reuse.
+
+\section{Numerical Invariants and Debug Counters}
+
+The first CUDA implementation should treat every equation above as an invariant
+that can fail loudly. This makes the research question falsifiable inside the
+GPU path, not after translating a CPU prototype.
+
+\subsection{Hard Invariants}
+
+\begin{enumerate}
+  \item \textbf{Confidence is bounded:}
+  \[
+    0 \leq \nu_j \leq 1.
+  \]
+  Any update that produces a value outside this range is a bug, not a tuning
+  problem.
+
+  \item \textbf{Covariance stays positive definite:}
+  \[
+    \lambda_{min} I \preceq \Sigma_j \preceq \lambda_{max} I.
+  \]
+  Clamp eigenvalues in the CUDA update kernel after every update. A clamped
+  covariance should increment a device debug counter; frequent clamps mean
+  assignment or split rules are unstable.
+
+  \item \textbf{Primitive identity is a hard early gate:}
+  \[
+    id_i^{prim}\neq id_j^{prim}
+    \quad\Rightarrow\quad
+    W_{ij}=0
+  \]
+  when both IDs are valid. Later experiments can soften this for alpha-tested
+  or deforming surfaces, but the first demo should prove that 3DGS history does
+  not cross triangle boundaries.
+
+  \item \textbf{Disoccluded history is never high confidence:}
+  \[
+    D_p=1 \Rightarrow \sum_{j\rightarrow p} a_{jp}\nu_j \leq \epsilon_D.
+  \]
+  This is the main anti-ghosting invariant. If a newly revealed pixel receives
+  strong old Gaussian history, the shared-state thesis fails for TAA.
+
+  \item \textbf{Radiance estimates stay non-negative and bounded:}
+  \[
+    0 \leq \hat{L}_j^k \leq L_{max,k}.
+  \]
+  The bound is not a physically pure estimator; it is a prototype guard against
+  rare path samples poisoning TAA/SR history.
+
+  \item \textbf{Stable assignment:} if two Gaussians have equal compatibility,
+  the lower stable index wins. This keeps CUDA validation reproducible enough
+  to compare runs while accepting normal floating-point ordering differences.
+\end{enumerate}
+
+\subsection{Per-Frame Counters}
+
+Every run should report:
+
+\begin{itemize}
+  \item samples extracted, assigned, rejected, and spawned,
+  \item rejections by gate: primitive, depth, normal, motion, residual,
+        confidence,
+  \item covariance clamps, splits, merges, and prunes,
+  \item visible, occluded, disoccluded, and out-of-frustum Gaussian counts,
+  \item stale-history energy on disoccluded pixels,
+  \item memory bytes for shared state versus separate-feature states,
+  \item per-feature quality deltas: TAA, SR, radiance, interpolation.
+\end{itemize}
+
+The key diagnostic is stale-history energy:
+
+\[
+  E_{stale} =
+  \frac{1}{|D_t|}
+  \sum_{p:D_t(p)=1}
+  \left\|
+    \sum_{j\rightarrow p} a_{jp}\nu_j c_j
+  \right\|_1.
+\]
+
+If $E_{stale}$ stays high after tuning gates, world-space Gaussians are not a
+safe TAA history representation for the current scene class.
+
+\section{CUDA Performance Targets}
+
+Quality wins are not enough. A shared Gaussian state is valuable only if the
+CUDA execution graph is simpler or cheaper than separate feature stacks.
+
+\subsection{Primary GPU Metrics}
+
+Each experiment should report:
+
+\begin{itemize}
+  \item per-kernel time from CUDA events,
+  \item end-to-end reconstruction frame time,
+  \item global memory read/write bytes,
+  \item atomics per sample and atomics per Gaussian,
+  \item hash-cell overflow rate,
+  \item tile-list build cost and tile-list reuse count,
+  \item average and worst-case Gaussians per tile,
+  \item occupancy, register pressure, and shared-memory use for update and
+        projection kernels,
+  \item memory footprint for image-space baselines, separate Gaussian states,
+        and the shared Gaussian state.
+\end{itemize}
+
+\subsection{GPU Integration Score}
+
+The CUDA-specific score should separate visual quality from implementation
+cost:
+
+\[
+  S_{cuda} =
+  S_{quality}
+  - \lambda_t \frac{T_{shared}}{T_{image}}
+  - \lambda_m \frac{M_{shared}}{M_{image}}
+  + \lambda_r R_{reuse}.
+\]
+
+$R_{reuse}$ measures how often the same Gaussian bins, tile lists, confidence
+values, and visibility decisions feed multiple outputs:
+
+\[
+  R_{reuse} =
+  \frac{
+    N_{shared\_consumers}
+  }{
+    N_{extra\_builds}+1
+  }.
+\]
+
+The shared-state thesis is weak if $S_{quality}>0$ but $S_{cuda}<0$. That case
+means the idea may be mathematically interesting but not a good vkGSplat CUDA
+architecture.
+
+\subsection{CUDA Kill Conditions}
+
+Stop or redesign the architecture if:
+
+\begin{itemize}
+  \item assignment requires unbounded neighbor search,
+  \item atomics dominate update time before scenes become interesting,
+  \item TAA, SR, radiance, and frame generation each rebuild their own bins,
+  \item tile occupancy variance creates persistent long-tail frame times,
+  \item shared-state memory exceeds separate Gaussian states,
+  \item quality depends on a CPU-only ordering or exact determinism assumption.
+\end{itemize}
+
+\section{Parameter Sweeps and Thesis Kill Tests}
+
+The first implementation should not hand-tune one pleasant clip. It should run
+small sweeps over the parameters that decide whether the unified state is
+actually robust.
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Parameter & Sweep & Primary metric & Kill condition \\
+\midrule
+$\theta_{assign}$ & 0.05--0.60 & $E_{ghost},E_{temp}$ & no stable interval \\
+$\sigma_d$ & 0.002--0.08 & disocclusion error & depth leak unavoidable \\
+$\sigma_n$ & 0.05--0.50 & edge shimmer & normal gate unused \\
+$\lambda_{min}$ & $10^{-6}$--$10^{-3}$ & blur, clamps & covariance collapses \\
+$\rho_{SR}$ & 0.35--1.00 & edge width & 2x requires new state \\
+$\gamma_{dis}$ & 0.05--0.50 & stale energy & stale energy persists \\
+$K_{cell}$ & 8--64 & memory, quality & quality needs unbounded K \\
+$\eta_{\dot{\mu}}$ & 0.05--0.80 & $E_{mid},E_{sil}$ & residual cannot predict fail \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For each sweep point, compute a compact integration score:
+
+\[
+  S =
+  w_T \Delta E_{temp} +
+  w_R \Delta E_{ref}^{SR} +
+  w_L \Delta V_L +
+  w_M \Delta E_{mid} -
+  w_G \max(0,\Delta E_{ghost}) -
+  w_C \Delta C_{cost}.
+\]
+
+Here positive $\Delta$ means improvement over the image-space baseline, except
+for ghosting and cost where increases are penalties. The unified state passes
+the research bar only if there is a non-tiny parameter interval where $S>0$ and
+$E_{ghost}$ remains within the 10\% guardrail. A single winning parameter point
+is not enough.
+
+\subsection{Ablation Protocol}
+
+The decisive ablation should hold sample inputs, jitter, and camera path fixed:
+
+\begin{enumerate}
+  \item \textbf{Image-space only:} current reprojection plus SVGF-style denoise.
+  \item \textbf{Separate Gaussian states:} one Gaussian cache for TAA, one for
+        SR, one for radiance, one for motion.
+  \item \textbf{Shared core:} one $C_j$ with task subslots.
+  \item \textbf{Shared core plus neural residual:} same as above, with
+        projected Gaussian feature planes.
+\end{enumerate}
+
+The integration hypothesis is supported only if variant 3 beats variant 2 on
+cost or consistency while staying close in quality. Variant 4 is useful only if
+the learned residual uses Gaussian features; test this by zeroing $\Phi_t$ at
+validation time and measuring the error jump.
+
+\section{Minimal Demonstration in the Current vkGSplat Workspace}
+
+The lowest-risk implementation path fits the current repository shape:
+
+\begin{itemize}
+  \item add \texttt{include/vkgsplat/cuda/gaussian\_reconstruction.h},
+  \item add \texttt{src/cuda/gaussian\_reconstruction.cu},
+  \item add \texttt{tests/test\_cuda\_gaussian\_reconstruction.cu},
+  \item register the CUDA benchmark/test only under
+        \texttt{VKGSPLAT\_ENABLE\_CUDA}.
+\end{itemize}
+
+The first CUDA code should reuse existing frame contracts instead of inventing
+new scene loading:
+
+\begin{itemize}
+  \item \texttt{RayTracingSeedFrame} supplies color, depth, NDC depth,
+        primitive ID, and camera matrices,
+  \item \texttt{compute\_camera\_motion\_map} supplies the baseline motion map,
+  \item \texttt{reproject\_history} supplies the image-space TAA baseline,
+  \item \texttt{denoise\_svgf\_baseline} supplies the Monte Carlo denoise
+        baseline.
+\end{itemize}
+
+The first demo sequence should be tiny:
+
+\begin{enumerate}
+  \item render four low-resolution jittered seed frames from the existing
+        triangle/Cornell-style ray-tracing seed path,
+  \item upload seed frames and auxiliary buffers to device memory,
+  \item build the Gaussian cache from frames 0--2 using CUDA update kernels,
+  \item project frame 3 at native resolution for TAA comparison,
+  \item project frame 3 at 2x resolution for SR comparison,
+  \item synthesize the midpoint between frames 1 and 2 on device, comparing
+        against a held-out rendered middle frame,
+  \item optionally query level-1 radiance from the same Gaussian state for a
+        low-spp diffuse indirect test,
+  \item report CUDA launch time, memory traffic, atomics, tile occupancy, and
+        quality metrics for every run.
+\end{enumerate}
+
+This demo proves integration only if the same Gaussian indices and shared core
+fields are used across all projections. A convenient implementation check is:
+
+\[
+  \frac{|J_{taa}\cap J_{sr}\cap J_{mot}|}
+       {|J_{taa}\cup J_{sr}\cup J_{mot}|}
+  \geq 0.6
+\]
+
+where $J_{task}$ is the set of Gaussian IDs that materially contribute to a
+task output. If overlap is low, the method is drifting toward separate hidden
+systems.
+
+\section{DLSS-5-Style Control Plane}
+
+If the analytic state works, the later neural resolver should not receive only
+RGB history. It should receive a control plane that makes generated detail
+accountable to the explicit scene state:
+
+\[
+  X_t =
+  (C_t, Z_t, U_t, N_t, A_t,
+   \Phi_t^{gauss}, \nu_t^{gauss}, V_t^{gauss}, D_t).
+\]
+
+Here $C_t$ is low-resolution color, $Z_t$ depth, $U_t$ motion, $N_t$ normal,
+$A_t$ material/albedo metadata, $\Phi_t^{gauss}$ projected Gaussian features,
+$\nu_t^{gauss}$ confidence, $V_t^{gauss}$ variance, and $D_t$ disocclusion.
+The resolver output should be decomposed:
+
+\[
+  O_t = O_t^{analytic} + R_\theta(X_t),
+\]
+
+where $O_t^{analytic}$ is the deterministic Gaussian reconstruction and
+$R_\theta$ is a bounded residual. This keeps the DLSS-5-style part honest: the
+network can add high-frequency lighting/material corrections, but the analytic
+state remains responsible for geometry, motion, visibility, and uncertainty.
+
+\section{Risks}
+
+\begin{itemize}
+  \item One state may be too overloaded; TAA, radiance, and interpolation may
+        need incompatible covariance scales.
+  \item Ghosting may worsen if stale Gaussians persist after disocclusion.
+  \item Radiance caching can leak light across visibility boundaries.
+  \item Super-resolution can become stable but blurry.
+  \item Frame interpolation needs residual handling for particles, UI,
+        transparency, reflections, and animated shading.
+  \item A DLSS-class commercial product still needs large training,
+        validation, and latency engineering beyond the explicit Gaussian
+        state, but the core vkGSplat framework should not depend on that.
+\end{itemize}
+
+\section{Current Recommendation}
+
+Proceed with the unified 3DGS integration thesis. The first target should not
+be a DLSS clone. The first target should be a falsifiable demo:
+
+\begin{quote}
+One Gaussian state, built from low-resolution jittered seed frames, drives both
+TAA and 2x super-resolution on a thin-geometry camera-pan clip, then reuses the
+same state for a rigid-motion midpoint interpolation test.
+\end{quote}
+
+If that works, add radiance-cache subslots. Only after the no-training path has
+a measurable signal should vkGSplat add a small learned resolver. If it does
+not, 3DGS may still be useful for individual features, but not as the
+integrating idea behind vkGSplat.
+
+\appendix
+
+\section{Appendix: Starting from Zero Graphics Hardware}
+
+If a vkGSplat-oriented accelerator starts from zero graphics-specific hardware,
+it should not attempt to recreate a full conventional GPU pipeline first. The
+right target is a neural-rendering/GS accelerator with a minimal graphics-like
+prefill front end. Graphics hardware should be treated as an evidence generator,
+not as the center of the product.
+
+The minimum useful prefill hardware is:
+
+\begin{itemize}
+  \item tiled triangle or mesh rasterization for visibility, depth, primitive
+        identity, and barycentrics,
+  \item depth test and preferably hierarchical/tile Z,
+  \item barycentric attribute interpolation for position, normal, material, and
+        motion features,
+  \item basic texture sampling only if material evidence cannot be supplied
+        another way,
+  \item simple compositing/blending for seed buffers,
+  \item optional BVH traversal only if ray evidence is central to the product.
+\end{itemize}
+
+The blocks to avoid in a first architecture are the broad legacy pieces that
+exist mostly to support full graphics API completeness:
+
+\begin{itemize}
+  \item a complex fixed-function shader pipeline,
+  \item tessellation, geometry-shader, and legacy compatibility paths,
+  \item a complete texture/filtering ecosystem beyond the needed evidence
+        channels,
+  \item a large ROP/blend feature matrix,
+  \item heavyweight generalized graphics scheduling,
+  \item large RT traversal blocks unless radiance/path evidence is a primary
+        workload.
+\end{itemize}
+
+The evidence target is not a finished shaded frame. The target is a tensor
+bundle:
+
+\[
+  A_t=(L,D,ID,X,N,V,M,\nu,\sigma^2),
+\]
+
+where $L$ is color/radiance evidence, $D$ is depth, $ID$ is primitive/material
+identity, $X$ is world position, $N$ is normal, $V$ is motion, $M$ is material
+or mask data, $\nu$ is confidence, and $\sigma^2$ is variance. Once this bundle
+is trustworthy, the differentiating work moves into Gaussian update,
+radiance-cache paging, tensorized decode, and optional neural resolving.
+
+For a first vkGSplat-class architecture, prioritize hardware roughly as:
+
+\begin{center}
+\small
+\begin{tabular}{cp{0.34\linewidth}p{0.44\linewidth}}
+\toprule
+Priority & Hardware block & Reason \\
+\midrule
+1 & tensor/matrix engines & Gaussian feature projection, attention-like resolve, and neural decode \\
+2 & SRAM/cache bandwidth and paging & radiance/KV-like cache residency and streaming reuse \\
+3 & sparse gather/scatter, reductions, atomics & online Gaussian update, compaction, assignment, and binning \\
+4 & tile scheduler and block/page tables & local decode, work clustering, and cache management \\
+5 & minimal raster/depth/interpolation & trustworthy prefill evidence for visibility, IDs, depth, and motion \\
+6 & texture sampling & only where material evidence cannot be represented cheaply as attributes \\
+7 & BVH/ray traversal & only if path/radiance evidence is central to the product target \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The architectural pipeline should be:
+
+\[
+\begin{gathered}
+\text{minimal raster/ray prefill}
+\rightarrow \text{seed evidence tensors}
+\rightarrow \text{Gaussian update}\\
+\rightarrow \text{paged radiance cache}
+\rightarrow \text{tensor decode for TAA/SR/framegen}.
+\end{gathered}
+\]
+
+This is different from dropping graphics entirely. The accelerator still needs
+visibility, identity, depth, and material evidence. But it does not need to
+spend early area on a general-purpose graphics pipeline if the product thesis
+is persistent Gaussian state and DLSS-class decode. The design principle is:
+
+\begin{quote}
+Do not reinvent graphics hardware wholesale. Reinvent the boundary: a thin
+prefill evidence generator feeding a tensorized Gaussian/radiance-cache decode
+engine.
+\end{quote}
+
+A useful pass/fail test for hardware planning is to implement two simulators:
+
+\begin{enumerate}
+  \item \textbf{Minimal evidence prefill:} raster/depth/ID/interpolation only,
+        plus tensor decode.
+  \item \textbf{Richer traditional prefill:} add texture/filtering/ray features
+        progressively.
+\end{enumerate}
+
+If richer prefill improves reconstruction quality much more than it costs, add
+those graphics blocks. If the minimal prefill already gives stable Gaussian
+state and good decode quality, invest the saved area in tensor/cache/paging
+instead. The burden of proof should be on adding legacy graphics area, not on
+removing the core tensor/cache path.
+
+
+\begin{thebibliography}{99}
+
+\bibitem{kerbl2023gs}
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis.
+\newblock 3D Gaussian Splatting for Real-Time Radiance Field Rendering.
+\newblock ACM Transactions on Graphics, 2023.
+\newblock \url{https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/}
+
+\bibitem{laine2020nvdiffrast}
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen,
+and Timo Aila.
+\newblock Modular Primitives for High-Performance Differentiable Rendering.
+\newblock ACM Transactions on Graphics, 2020.
+\newblock \url{https://nvlabs.github.io/nvdiffrast/}
+
+\bibitem{ye2024gsplat}
+Vickie Ye, Ruilong Li, Justin Kerr, Angjoo Kanazawa, and Matthew Tancik.
+\newblock gsplat: An Open-Source Library for Gaussian Splatting.
+\newblock arXiv:2409.06765, 2024.
+\newblock \url{https://arxiv.org/abs/2409.06765}
+
+\bibitem{yu2024mipsplat}
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger.
+\newblock Mip-Splatting: Alias-Free 3D Gaussian Splatting.
+\newblock CVPR, 2024.
+\newblock \url{https://openaccess.thecvf.com/content/CVPR2024/html/Yu_Mip-Splatting_Alias-free_3D_Gaussian_Splatting_CVPR_2024_paper.html}
+
+\bibitem{yan2024multiscale}
+Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee.
+\newblock Multi-Scale 3D Gaussian Splatting for Anti-Aliased Rendering.
+\newblock CVPR, 2024.
+\newblock \url{https://cvpr.thecvf.com/virtual/2024/poster/30347}
+
+\bibitem{liang2024analytic}
+Zhihao Liang, Qi Zhang, Wenbo Hu, Ying Feng, Lei Zhu, and Kui Jia.
+\newblock Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic
+Integration.
+\newblock arXiv:2403.11056, 2024.
+\newblock \url{https://arxiv.org/abs/2403.11056}
+
+\bibitem{steiner2025aaa}
+Michael Steiner, Thomas Koehler, Lukas Radl, Felix Windisch,
+Dieter Schmalstieg, and Markus Steinberger.
+\newblock AAA-Gaussians: Anti-Aliased and Artifact-Free 3D Gaussian Rendering.
+\newblock arXiv preprint, 2025.
+\newblock \url{https://tugraz.elsevierpure.com/en/publications/aaa-gaussians-anti-aliased-and-artifact-free-3d-gaussian-renderin/}
+
+\bibitem{yang2025lodgs}
+Zhenya Yang, Bingchen Gong, and Kai Chen.
+\newblock LOD-GS: Level-of-Detail-Sensitive 3D Gaussian Splatting for Detail
+Conserved Anti-Aliasing.
+\newblock arXiv:2507.00554, 2025.
+\newblock \url{https://papers.cool/arxiv/2507.00554}
+
+\bibitem{suh2026aasplat}
+Taewoo Suh, Sungpyo Kim, Jongmin Park, and Munchurl Kim.
+\newblock AA-Splat: Anti-Aliased Feed-forward Gaussian Splatting.
+\newblock arXiv:2603.29394, 2026.
+\newblock \url{https://papers.cool/arxiv/2603.29394}
+
+\bibitem{bauer2026gscache}
+David Bauer, Qi Wu, Hamid Gadirov, and Kwan Liu Ma.
+\newblock GSCache: Real-Time Radiance Caching for Volume Path Tracing Using
+3D Gaussian Splatting.
+\newblock IEEE Transactions on Visualization and Computer Graphics, 2026.
+\newblock \url{https://research.rug.nl/en/publications/gscache-real-time-radiance-caching-for-volume-path-tracing-using-/}
+
+\bibitem{muller2021nrc}
+Thomas Mueller, Fabrice Rousselle, Jan Novak, and Alexander Keller.
+\newblock Real-Time Neural Radiance Caching for Path Tracing.
+\newblock ACM Transactions on Graphics, 2021.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/muller2021nrc/}
+
+\bibitem{muller2020ncv}
+Thomas Mueller, Fabrice Rousselle, Alexander Keller, and Jan Novak.
+\newblock Neural Control Variates.
+\newblock ACM Transactions on Graphics, 2020.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/muller2020ncv/}
+
+\bibitem{schied2017svgf}
+Christoph Schied, Anton Kaplanyan, Chris Wyman, Anjul Patney,
+Chakravarty R. Alla Chaitanya, John Burgess, Shiqiu Liu,
+Carsten Dachsbacher, Aaron Lefohn, and Marco Salvi.
+\newblock Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction
+for Path-Traced Global Illumination.
+\newblock High Performance Graphics, 2017.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/schied2017spatiotemporal/}
+
+\bibitem{bako2017kpcn}
+Steve Bako, Thijs Vogels, Brian McWilliams, Mark Meyer, Jan Novak,
+Alex Harvill, Pradeep Sen, Tony DeRose, and Fabrice Rousselle.
+\newblock Kernel-Predicting Convolutional Networks for Denoising Monte Carlo
+Renderings.
+\newblock ACM Transactions on Graphics, 2017.
+\newblock \url{https://studios.disneyresearch.com/2017/07/20/kernel-predicting-convolutional-networks-for-denoising-monte-carlo-renderings/}
+
+\bibitem{bitterli2020restir}
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn,
+and Wojciech Jarosz.
+\newblock Spatiotemporal Reservoir Resampling for Real-Time Ray Tracing with
+Dynamic Direct Lighting.
+\newblock ACM Transactions on Graphics, 2020.
+\newblock \url{https://research.nvidia.com/labs/rtr/publication/bitterli2020spatiotemporal/}
+
+\bibitem{kheradmand2025stochasticsplats}
+Shakiba Kheradmand, Delio Vicini, George Kopanas, Dmitry Lagun,
+Kwang Moo Yi, Mark Matthews, and Andrea Tagliasacchi.
+\newblock StochasticSplats: Stochastic Rasterization for Sorting-Free 3D
+Gaussian Splatting.
+\newblock arXiv:2503.24366, 2025.
+\newblock \url{https://arxiv.org/abs/2503.24366}
+
+\bibitem{zhou2024unified}
+Yang Zhou, Songyin Wu, and Ling-Qi Yan.
+\newblock Unified Gaussian Primitives for Scene Representation and Rendering.
+\newblock arXiv:2406.09733, 2024.
+\newblock \url{https://mangosister.github.io/gsr_site/}
+
+\bibitem{wu2024dynamic4dgs}
+Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei,
+Wenyu Liu, Qi Tian, and Xinggang Wang.
+\newblock 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering.
+\newblock CVPR, 2024.
+\newblock \url{https://guanjunwu.github.io/4dgs/}
+
+\bibitem{li2023spacetime}
+Zhan Li, Zhang Chen, Zhong Li, and Yi Xu.
+\newblock Spacetime Gaussian Feature Splatting for Real-Time Dynamic View
+Synthesis.
+\newblock arXiv:2312.16812, 2023.
+\newblock \url{https://arxiv.org/abs/2312.16812}
+
+\bibitem{duan2024rotor4dgs}
+Yuanxing Duan, Fangyin Wei, Qiyu Dai, Yuhang He, Wenzheng Chen, and Baoquan Chen.
+\newblock 4D-Rotor Gaussian Splatting: Towards Efficient Novel View Synthesis
+for Dynamic Scenes.
+\newblock 2024.
+\newblock \url{https://research.nvidia.com/publication/2024-02_4d-rotor-gaussian-splatting-towards-efficient-novel-view-synthesis-dynamic}
+
+\bibitem{lin2023gaussianflow}
+Youtian Lin, Zuozhuo Dai, Siyu Zhu, and Yao Yao.
+\newblock Gaussian-Flow: 4D Reconstruction with Dynamic 3D Gaussian Particle.
+\newblock arXiv:2312.03431, 2023.
+\newblock \url{https://huggingface.co/papers/2312.03431}
+
+\bibitem{gao2024gaussianflow}
+Quankai Gao, Qiangeng Xu, Zhe Cao, Ben Mildenhall, Wenchao Ma, Le Chen,
+Dahang Tang, and Ulrich Neumann.
+\newblock GaussianFlow: Splatting Gaussian Dynamics for 4D Content Creation.
+\newblock arXiv:2403.12365, 2024.
+\newblock \url{https://huggingface.co/papers/2403.12365}
+
+\bibitem{zhu2024motiongs}
+Ruijie Zhu, Yanzhe Liang, Hanzhi Chang, Jiacheng Deng, Jiahao Lu,
+Wenfei Yang, Tianzhu Zhang, and Yongdong Zhang.
+\newblock MotionGS: Exploring Explicit Motion Guidance for Deformable 3D
+Gaussian Splatting.
+\newblock arXiv:2410.07707, 2024.
+\newblock \url{https://huggingface.co/papers/2410.07707}
+
+\bibitem{liu2026kfgs}
+Qingyuan Tang, Yufei Yin, Yanming Zhu, Zhou Yu, Zhenzhong Kuang,
+Jiajun Ding, and Jifa He.
+\newblock KF-GS: Kalman Filter-Guided Gaussian Splatting for Real-Time
+High-Quality Dynamic Scene Reconstruction.
+\newblock Journal of Visual Communication and Image Representation, in press,
+2026.
+\newblock \url{https://www.sciencedirect.com/science/article/pii/S1047320326001100}
+
+\bibitem{wang2026retimegs}
+Xuezhen Wang, Li Ma, Yulin Shen, Zeyu Wang, and Pedro V. Sander.
+\newblock RetimeGS: Continuous-Time Reconstruction of 4D Gaussian Splatting.
+\newblock CVPR, 2026.
+\newblock \url{https://william-wang2.github.io/RetimeGS/}
+
+\bibitem{nvidia2026dlss5}
+NVIDIA.
+\newblock NVIDIA DLSS 5 Delivers AI-Powered Breakthrough in Visual Fidelity
+for Games.
+\newblock March 16, 2026.
+\newblock \url{https://nvidianews.nvidia.com/news/nvidia-dlss-5-delivers-ai-powered-breakthrough-in-visual-fidelity-for-games}
+
+\bibitem{nvidia2026dlss45}
+NVIDIA.
+\newblock DLSS 4.5 Dynamic Multi Frame Generation and Multi Frame Generation
+6X Available Now.
+\newblock March 31, 2026.
+\newblock \url{https://www.nvidia.com/en-us/geforce/news/dlss-4-5-dynamic-multi-frame-generation-6x-mode-released/}
+
+\bibitem{nvidia2026dlssdeveloper}
+NVIDIA Developer.
+\newblock NVIDIA DLSS.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://developer.nvidia.com/rtx/dlss}
+
+\bibitem{nvidia2025dlss4}
+NVIDIA.
+\newblock NVIDIA DLSS 4 Introduces Multi Frame Generation and Enhancements for
+All DLSS Technologies.
+\newblock January 6, 2025.
+\newblock \url{https://www.nvidia.com/en-sg/geforce/news/dlss4-multi-frame-generation-ai-innovations/}
+
+\bibitem{nvidia2025dlss4research}
+NVIDIA Research.
+\newblock DLSS 4: Transforming Real-Time Graphics with AI.
+\newblock Technical report, 2025.
+\newblock \url{https://research.nvidia.com/labs/adlr/DLSS4/}
+
+\bibitem{nvidia2022hopper}
+NVIDIA.
+\newblock NVIDIA Hopper Architecture In-Depth.
+\newblock Technical blog, 2022.
+\newblock \url{https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/}
+
+\bibitem{nvidia2026transformerenginefp8}
+NVIDIA.
+\newblock FP8 Current Scaling.
+\newblock Transformer Engine documentation, accessed May 5, 2026.
+\newblock \url{https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/features/low_precision_training/fp8_current_scaling/fp8_current_scaling.html}
+
+\bibitem{nvidia2026cudamath}
+NVIDIA.
+\newblock CUDA Math API Reference Manual.
+\newblock CUDA Toolkit documentation, accessed May 5, 2026.
+\newblock \url{https://docs.nvidia.com/cuda/archive/13.0.1/cuda-math-api/index.html}
+
+\bibitem{nvidia2026nvfp4}
+NVIDIA.
+\newblock NVFP4.
+\newblock Transformer Engine documentation, accessed May 5, 2026.
+\newblock \url{https://nvidia.github.io/TransformerEngine/features/low_precision_training/nvfp4/nvfp4.html}
+
+\bibitem{ocp2026mx}
+Open Compute Project.
+\newblock OCP Microscaling Formats (MX) Specification, Version 1.0.
+\newblock 2026.
+\newblock \url{https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf}
+
+\bibitem{kwon2023pagedattention}
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng,
+Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.
+\newblock Efficient Memory Management for Large Language Model Serving with
+PagedAttention.
+\newblock SOSP, 2023.
+\newblock \url{https://huggingface.co/papers/2309.06180}
+
+\bibitem{prabhu2025vattention}
+Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ramjee, and
+Ashish Panwar.
+\newblock vAttention: Dynamic Memory Management for Serving LLMs without
+PagedAttention.
+\newblock ASPLOS, 2025.
+\newblock \url{https://www.microsoft.com/en-us/research/publication/vattention-dynamic-memory-management-for-serving-llms-without-pagedattention/}
+
+\bibitem{intel2026xess}
+Intel.
+\newblock Intel XeSS Super Resolution Developer Guide 2.0.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://www.intel.com/content/www/us/en/developer/articles/technical/xess-sr-developer-guide.html}
+
+\bibitem{amd2026fsr}
+AMD.
+\newblock AMD FSR Technologies.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://www.amd.com/en/products/graphics/technologies/fidelityfx/super-resolution.html}
+
+\end{thebibliography}
+
+\end{document}

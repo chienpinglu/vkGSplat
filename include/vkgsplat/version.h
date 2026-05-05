@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // vkGSplat: A compute-first Vulkan path for robotics SDG.
-// See paper/vkGSplat.tex (Lu, 2026) for the position argument.
+// See papers/vkGSplat.tex (Lu, 2026) for the position argument.
 #pragma once
 
 #define VKGSPLAT_VERSION_MAJOR 0

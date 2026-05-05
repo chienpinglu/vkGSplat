@@ -1,0 +1,686 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+
+\title{3D Gaussian Splatting for Temporal AA, Super Resolution, and Motion-Accurate Frame Interpolation}
+\author{vkGSplat research note}
+\date{Started May 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Executive Thesis}
+
+The idea is plausible and worth a serious research branch:
+
+\begin{quote}
+Use 3D Gaussian Splatting not merely as a renderer, but as an explicit
+spatio-temporal reconstruction state for temporal anti-aliasing, temporal
+super-resolution, frame generation, and motion-accurate frame interpolation.
+The goal is a compute-first counterpart to DLSS 4.5 and later: less of a
+black-box image upscaler, more of a renderer whose history buffer is a
+persistent, splattable 3D/4D representation.
+\end{quote}
+
+As of May 2026, DLSS 4.5 is a real product target: NVIDIA describes it as a
+second-generation transformer model for Super Resolution plus Dynamic Multi
+Frame Generation and 6X Multi Frame Generation on supported RTX 50-series GPUs
+\cite{nvidia2026dlss45,nvidia2026dlssdeveloper}. The research question for
+vkGSplat is not whether an independent project can out-train NVIDIA's network.
+The sharper question is whether a renderer that owns its scene/path state can
+avoid some of the ambiguity that image-space temporal reconstruction must learn
+around disocclusion, subpixel geometry, specular motion, and frame interpolation.
+
+Current subjective likelihoods:
+
+\begin{itemize}
+  \item Useful vkGSplat temporal reconstruction experiment: \textbf{high}, about 0.8.
+  \item 3DGS-assisted TAA beating current CPU reprojection on static scenes: \textbf{medium-high}, about 0.65.
+  \item 3DGS-assisted 2x temporal super-resolution prototype: \textbf{medium}, about 0.55.
+  \item Motion-accurate 3DGS frame interpolation for rendered/captured clips: \textbf{medium-high}, about 0.65.
+  \item 3DGS-based game-style frame generation competitive with DLSS-style MFG: \textbf{low-medium}, about 0.3.
+  \item A full ``DLSS 4.5 counterpart'' without a learned image model: \textbf{low}, about 0.2.
+\end{itemize}
+
+\section{Why 3DGS Might Matter for TAA/SR}
+
+Modern temporal upscalers operate on a low-resolution, jittered current frame
+plus engine-provided auxiliaries: depth, motion vectors, exposure, reactive
+masks, and history. DLSS 2 made this temporal-super-sampling pattern neural;
+DLSS 4 moved Super Resolution, DLAA, and Ray Reconstruction to transformer
+models; DLSS 4.5 upgraded the transformer model and extended frame generation
+\cite{nvidia2025dlss4,nvidia2026dlss45}. XeSS is explicitly described by Intel
+as AI-based temporal super sampling and anti-aliasing using jittered color,
+motion vectors, and depth \cite{intel2026xess}. AMD FSR also evolved from
+spatial upscaling to temporal upscaling and frame generation, and the newer FSR
+``Redstone'' branding includes upscaling, frame generation, ray regeneration,
+and radiance caching \cite{amd2026fsr}.
+
+The common limitation is that most of this reconstruction state is image-space
+or screen-derived. That is practical and general, but it means the algorithm
+must infer whether a sample is stable history, newly disoccluded content, a
+transparent particle, specular reflection, UI, or thin geometry. A 3DGS-based
+pipeline can carry explicit object/primitive/Gaussian identity through time.
+This gives the reconstruction system a stable world-space address for history.
+
+\section{Relevant Research Landscape}
+
+\subsection{Anti-Aliased 3DGS}
+
+The core 3DGS renderer is not alias-free. At different resolutions or camera
+distances, point-sampled Gaussian evaluation can produce blur, jaggies, popping,
+and sampling-rate sensitivity. This is directly relevant to temporal SR:
+before building a DLSS-like system, the splat renderer itself must understand
+pixel footprint.
+
+Multi-Scale 3D Gaussian Splatting keeps Gaussians at multiple scales so distant
+or low-resolution rendering can use fewer larger primitives, improving both
+quality and speed \cite{yan2024multiscale}. Mip-Splatting is the earlier
+must-cite alias-free baseline: it identifies sampling-rate changes, focal
+length, and camera distance as sources of 3DGS artifacts, then combines a 3D
+smoothing filter with a 2D Mip/box-filter approximation \cite{yu2024mipsplat}.
+Analytic-Splatting analytically approximates Gaussian integrals over pixel
+windows instead of evaluating at isolated pixel centers
+\cite{liang2024analytic}. AAA-Gaussians argues for fuller 3D evaluation
+through the pipeline, with adaptive 3D smoothing and stable view-space bounds
+to reduce aliasing, projection artifacts, and popping \cite{steiner2025aaa}.
+LOD-GS makes filtering strength sampling-rate-sensitive \cite{yang2025lodgs}.
+AA-Splat targets feed-forward 3DGS and uses opacity-balanced band-limiting for
+arbitrary-resolution rendering \cite{suh2026aasplat}.
+
+These works are mostly spatial or per-frame. The opening for vkGSplat is to
+combine their footprint-aware filtering with temporal history.
+
+\subsection{3DGS Super-Resolution}
+
+SplatSuRe studies selective super-resolution for multi-view consistent 3DGS,
+motivated by the fact that independently super-resolving input views can
+introduce multi-view inconsistency and blurry 3D renders \cite{asthana2026splatsure}.
+2D Gaussian Splatting has also been adapted to arbitrary-scale image
+super-resolution with feed-forward Gaussian prediction and scale-aware
+rasterization \cite{chen2025gassr}. These works support the idea that Gaussian
+representations can be used as reconstruction carriers, not only as final
+scene geometry.
+
+\subsection{4D and Spacetime Gaussian Splatting}
+
+Frame generation needs a motion model. 4D Gaussian Splatting and related
+spacetime Gaussian methods show that Gaussians can carry time and deformation
+semantics. 4D-GS uses a deformation field and HexPlane-style structure for
+real-time dynamic scenes \cite{wu2024dynamic4dgs}. 4D-Rotor Gaussian Splatting
+uses anisotropic XYZT Gaussians and temporal slicing, reporting real-time
+rendering rates on RTX hardware \cite{duan2024rotor4dgs}. Spacetime Gaussian
+Feature Splatting adds temporal opacity and parametric motion/rotation, with
+splatted neural features for dynamic view synthesis \cite{li2023spacetime}.
+
+These papers are not DLSS replacements, but they provide a vocabulary for
+Gaussian frame interpolation: interpolate or slice a 4D/temporal Gaussian
+state, then splat the intermediate image.
+
+\subsection{Motion-Accurate Frame Interpolation}
+
+This deserves its own category. A normal frame-generation system can be
+perceptually smooth while being motion-inaccurate: it may hallucinate an
+intermediate image that looks plausible but does not preserve real object
+trajectories, depth ordering, or visibility events. For vkGSplat, the stronger
+target is \emph{motion-accurate interpolation}: synthesize an intermediate
+frame by advancing explicit Gaussian state through a physically or
+geometrically meaningful motion model.
+
+RetimeGS is the closest current reference. It frames arbitrary-timestamp
+rendering as continuous-time 4DGS reconstruction and identifies poor
+inter-frame rendering in prior 4DGS methods as temporal aliasing
+\cite{wang2026retimegs}. Its project page emphasizes relatively large
+inter-frame motion, coarse flow-guided primitive correspondences,
+triple-rendering supervision, spline trajectories, and dynamic stretching as
+tools for ghost-free retiming. Its stated limitation is also instructive:
+extreme rapid motion can still break optical-flow correspondences.
+
+Other motion-aware Gaussian papers suggest useful mechanisms. Gaussian-Flow
+models dynamic Gaussian particles with time/frequency-domain deformation
+\cite{lin2023gaussianflow}. GaussianFlow connects Gaussian dynamics and pixel
+velocities for 4D content creation \cite{gao2024gaussianflow}. MotionGS uses
+explicit motion guidance for deformable 3DGS \cite{zhu2024motiongs}. KF-GS uses
+Kalman-filter-style prediction and correction to improve dynamic motion
+modeling \cite{liu2026kfgs}. These works point toward a frame interpolation
+system whose core data is not only optical flow between two images, but
+per-Gaussian position, velocity, covariance, opacity, and visibility confidence.
+
+The broader video-frame-interpolation literature is also useful. AceVFI
+classifies VFI methods into center-time frame interpolation and arbitrary-time
+frame interpolation, and identifies large motion, occlusion, lighting change,
+and non-linear motion as central challenges \cite{kye2026acevfi}. Those are the
+same failure modes a 3DGS interpolation system must measure, but 3DGS gives us
+a stronger state variable than two images and a flow field.
+
+\subsection{DLSS, FSR, and XeSS as the Bar}
+
+DLSS 3 frame generation used current/prior frames, optical flow, and engine data
+such as motion vectors and depth \cite{nvidia2022dlss3}. DLSS 4 introduced
+Multi Frame Generation and transformer models for Super Resolution, DLAA, and
+Ray Reconstruction \cite{nvidia2025dlss4,nvidia2025dlss4research}. DLSS 4.5
+then introduced a second-generation transformer Super Resolution model and
+Dynamic Multi Frame Generation / 6X MFG \cite{nvidia2026dlss45}.
+
+This sets a very high bar. A 3DGS counterpart should not begin by trying to
+replicate the whole neural stack. It should attack the part DLSS cannot
+explicitly own: persistent scene-space reconstruction state.
+
+\section{Candidate Architectures}
+
+\subsection{A: Gaussian History Buffer}
+
+Replace or augment the image-space history buffer with persistent Gaussian
+history records:
+
+\[
+  H_j =
+  (\mu_j, \Sigma_j, q_j, c_j, f_j, v_j, m_j, \tau_j, id_j),
+\]
+
+where $\mu_j$ and $\Sigma_j$ are world-space mean/covariance, $q_j$ is
+orientation or tangent frame, $c_j$ is accumulated color/radiance, $f_j$ is a
+feature vector, $v_j$ is variance, $m_j$ is sample mass, $\tau_j$ is last update
+time, and $id_j$ is primitive/Gaussian identity.
+
+For each jittered low-resolution frame:
+
+\begin{enumerate}
+  \item unproject visible pixels using depth and camera matrices,
+  \item attach primitive ID / material ID / motion vector / confidence,
+  \item update nearby Gaussian history entries,
+  \item splat the history entries into target-resolution pixels,
+  \item blend with current samples using depth, primitive ID, velocity, and
+        variance gates.
+\end{enumerate}
+
+This is the cleanest first vkGSplat experiment because the repo already has
+reprojection contracts in \path{include/vkgsplat/reprojection.h} and
+\path{src/core/reprojection.cpp}. The current code reprojects previous color
+in screen space and rejects by depth/primitive mismatch. A Gaussian history
+buffer keeps the same rejection semantics but moves the address space from
+pixels to stable 3D samples.
+
+\subsection{B: Gaussian Temporal Super-Resolution}
+
+Render low-resolution jittered frames. Each frame contributes subpixel samples
+to a target-resolution Gaussian reconstruction layer. Instead of resolving
+history by clamped pixel neighborhoods, resolve by projected Gaussian footprint:
+
+\[
+  C(p) =
+  \frac{\sum_j w_j(p, t)\,c_j}
+       {\sum_j w_j(p, t) + \epsilon}.
+\]
+
+Here $w_j$ should include:
+
+\[
+  w_j = w_{\mathrm{footprint}}
+        w_{\mathrm{depth}}
+        w_{\mathrm{normal}}
+        w_{\mathrm{primitive}}
+        w_{\mathrm{velocity}}
+        w_{\mathrm{variance}}.
+\]
+
+The important difference from TAAU is that the accumulated subpixel evidence is
+not tied to last frame's integer pixels. It is tied to world-space Gaussian
+support and can be re-sampled at the output resolution each frame.
+
+\subsection{C: Gaussian Residual Layer for DLSS-Style Reconstruction}
+
+A hybrid architecture may be strongest:
+
+\[
+  \begin{aligned}
+  &\text{low-res color/depth/velocity}
+  + \text{image history}
+  + \text{Gaussian history features}
+  \\
+  &\rightarrow
+  \text{small reconstruction model}.
+  \end{aligned}
+\]
+
+The model does not need to infer everything from pixels. Gaussian history can
+provide stable features:
+
+\begin{itemize}
+  \item accumulated radiance,
+  \item variance/confidence,
+  \item primitive identity consistency,
+  \item stable world position,
+  \item visibility age,
+  \item disocclusion likelihood,
+  \item high-resolution subpixel coverage.
+\end{itemize}
+
+This is the most plausible route to a DLSS-like result, but it is a later-stage
+branch because it needs training data and a small inference runtime.
+
+\subsection{D: Motion-Accurate Gaussian Frame Interpolation}
+
+For interpolation between rendered frames $t_0$ and $t_1$, construct an
+intermediate Gaussian state at $t_\alpha$. The simplest model is linear:
+
+\[
+  \mu_j(t_\alpha) =
+  (1-\alpha)\mu_j(t_0) + \alpha \mu_j(t_1)
+\]
+
+with analogous interpolation for rotation, scale, opacity, color/features, and
+visibility confidence. Render by splatting the interpolated state.
+
+But a motion-accurate system should move beyond linear interpolation. A better
+per-Gaussian state is:
+
+\[
+  M_j(t) = (\mu_j(t), \dot{\mu}_j(t), \Sigma_j(t), R_j(t),
+            \alpha_j(t), c_j(t), \nu_j(t)),
+\]
+
+where $\dot{\mu}_j$ is velocity and $\nu_j$ is visibility confidence. The
+trajectory can be constant-velocity, Kalman predicted/corrected, spline-based
+as in RetimeGS, or driven by engine object transforms. The renderer should also
+produce a forward and backward motion-consistency residual:
+
+\[
+  e_j =
+  \left\|\Pi_{t_1}(\mu_j(t_1)) -
+  \left(\Pi_{t_0}(\mu_j(t_0)) + u_{0\rightarrow1}\right)\right\|,
+\]
+
+where $\Pi_t$ projects to the camera at time $t$ and $u_{0\rightarrow1}$ is
+engine or optical flow. High residuals mark Gaussians that should not be
+trusted for interpolation.
+
+This is the direct 3DGS counterpart to video frame interpolation. It should be
+easier for rigid camera motion and object transforms than for particles,
+transparency, specular effects, animated shading, or UI. A robust system likely
+needs two paths:
+
+\begin{itemize}
+  \item geometry-aware Gaussian interpolation for stable scene content,
+  \item image-space optical-flow or neural residual generation for everything
+        the Gaussian state cannot explain.
+\end{itemize}
+
+\subsection{E: Minimal vkGSplat Data Contracts}
+
+The implementation should begin as a reference contract, not a new renderer.
+A useful first pair of structs:
+
+\begin{verbatim}
+struct GaussianHistorySample {
+    float3 position;
+    float3 normal;
+    float3 color;
+    float3 radiance_feature;
+    float2 current_to_previous_px;
+    float depth;
+    float variance;
+    uint32_t primitive_id;
+    uint32_t material_id;
+    uint32_t frame_index;
+};
+
+struct GaussianMotionState {
+    float3 position_t0;
+    float3 position_t1;
+    float3 velocity_t0;
+    float3 velocity_t1;
+    float4 rotation_t0;
+    float4 rotation_t1;
+    float3 scale_t0;
+    float3 scale_t1;
+    float opacity_t0;
+    float opacity_t1;
+    float visibility_confidence;
+    float flow_residual_px;
+    uint32_t primitive_id;
+    uint32_t motion_group_id;
+};
+\end{verbatim}
+
+\texttt{GaussianHistorySample} is the TAA/SR side: it turns current
+reprojection outputs into persistent world-space evidence. \texttt{GaussianMotionState}
+is the interpolation side: it stores enough state to synthesize a midpoint and
+to reject motion that disagrees with engine or optical flow.
+
+\section{Disocclusion and Ghosting}
+
+The central failure mode of all temporal reconstruction is stale history. The
+3DGS advantage is that stale history can be tested in more ways than screen
+clamping:
+
+\begin{itemize}
+  \item depth agreement after projecting the Gaussian into the current frame,
+  \item primitive/Gaussian ID agreement,
+  \item normal and tangent-frame agreement,
+  \item opacity/transmittance ordering agreement,
+  \item current visibility confidence,
+  \item age since last observation,
+  \item sample variance and neighborhood disagreement.
+\end{itemize}
+
+The danger is that 3DGS can make ghosting worse if old Gaussians remain visible
+after an object moves or a surface becomes occluded. The cache must support
+decay, visibility invalidation, and possibly per-camera frustum evidence.
+
+\section{vkGSplat Experiment Plan}
+
+\subsection{Stage 0: Baseline TAAU Contract}
+
+Extend the current reprojection module into a minimal temporal AA/upscaling
+contract:
+
+\begin{itemize}
+  \item add Halton or R2 jitter to seed frames,
+  \item render low resolution and output high resolution,
+  \item reproject history using camera motion map,
+  \item add neighborhood clamp or variance clamp,
+  \item measure against high-resolution supersampled reference.
+\end{itemize}
+
+This is the control. Without it, a Gaussian method has no honest baseline.
+
+\subsection{Stage 1: Static Gaussian History Cache}
+
+Implement CPU-only:
+
+\begin{itemize}
+  \item visible pixel $\rightarrow$ world sample,
+  \item world samples update Gaussian cache cells,
+  \item cache splats to target resolution,
+  \item compare against screen-space TAA and current reprojection.
+\end{itemize}
+
+Start with static scenes and camera-only motion. Use primitive-ID gates from
+the existing vkGSplat reprojection path.
+
+\subsection{Stage 2: 2x Temporal Super-Resolution}
+
+Render at half resolution with jitter and reconstruct full resolution.
+Compare:
+
+\begin{itemize}
+  \item nearest/bilinear upscale,
+  \item screen-space TAAU,
+  \item Gaussian history resolve,
+  \item Gaussian history plus small spatial filter.
+\end{itemize}
+
+Metrics should include PSNR/SSIM/LPIPS/FLIP where available, plus temporal
+metrics: shimmer under slow camera pans, ghosting after disocclusion, and edge
+stability on thin geometry.
+
+\subsection{Stage 3: Dynamic Gaussian Motion}
+
+Add object transforms and per-Gaussian velocity:
+
+\begin{itemize}
+  \item update Gaussian centers/covariances through object motion,
+  \item invalidate history on topology/primitive mismatch,
+  \item compare against engine motion-vector reprojection,
+  \item test on moving rigid objects before deformation.
+\end{itemize}
+
+\subsection{Stage 4: Motion-Accurate Gaussian Frame Interpolation}
+
+Generate one intermediate frame between two rendered frames:
+
+\begin{itemize}
+  \item interpolate/slice Gaussian state at a chosen $\alpha \in (0,1)$,
+  \item start with engine-known camera/object transforms and constant velocity,
+  \item add spline/Kalman trajectories for non-linear motion,
+  \item validate projected Gaussian motion against engine or optical flow,
+  \item splat intermediate view,
+  \item generate a disocclusion mask from forward/backward Gaussian visibility,
+  \item composite reactive image-space residuals for particles, transparency,
+        specular effects, and UI,
+  \item compare against optical-flow interpolation and native middle frame.
+\end{itemize}
+
+This should stay separate from the TAAU work until Stage 2 is healthy. The
+first proof point is not ``more frames'' but whether the generated midpoint
+lands moving edges, occlusion boundaries, and object silhouettes in the same
+place as a true rendered middle frame.
+
+\subsection{Stage 5: Learned Resolver}
+
+Only after the analytic resolver shows signal:
+
+\begin{itemize}
+  \item train a compact model on low-res inputs plus Gaussian history features,
+  \item use high-res/high-spp references from vkGSplat or Wicked Engine,
+  \item keep inference compatible with CUDA/Metal/Triton-style kernels,
+  \item compare with non-Gaussian neural TAAU using the same training data.
+\end{itemize}
+
+\section{Key Risks}
+
+\begin{itemize}
+  \item The method may become a heavier version of TAA without enough quality
+        gain.
+  \item Gaussian history can smear across visibility boundaries unless gating
+        is strict.
+  \item Specular and transparent effects may remain image-space problems.
+  \item Dynamic objects need robust lifetime and identity management.
+  \item A full DLSS 4.5-class model needs large training data and careful
+        latency engineering.
+  \item 3DGS visibility ordering can fight temporal stability if splats pop,
+        split, merge, or change opacity under optimization.
+\end{itemize}
+
+\section{Current Recommendation}
+
+Do pursue this, but sequence it conservatively:
+
+\begin{quote}
+First build a strong screen-space TAAU reference. Then add a CPU Gaussian
+history cache for static camera-motion scenes. If that beats TAAU on shimmer,
+thin geometry, and disocclusion without huge cost, move it to CUDA/Metal and
+only then explore learned resolving and frame generation.
+\end{quote}
+
+The best vkGSplat framing is not ``we clone DLSS.'' It is:
+
+\begin{quote}
+vkGSplat explores explicit 3D/4D reconstruction state as a compute-first
+alternative to purely image-space temporal neural rendering.
+\end{quote}
+
+\section{Overnight Research TODO}
+
+\begin{itemize}
+  \item Read full papers for Multi-Scale 3DGS, Analytic-Splatting,
+        AAA-Gaussians, LOD-GS, AA-Splat, SplatSuRe, RetimeGS, and 4DGS variants.
+  \item Search for direct ``Gaussian temporal super-resolution'' or
+        ``Gaussian TAA'' papers that may not surface under 3DGS keywords.
+  \item Compare DLSS 4.5, AMD FSR Redstone, and XeSS 3-style multi-frame
+        generation claims using primary sources where possible.
+  \item Extract RetimeGS details for continuous-time opacity, spline
+        trajectories, flow-guided correspondences, triple rendering, and
+        dynamic stretching.
+  \item Sketch a \path{GaussianHistoryBuffer} C++ contract compatible with
+        current vkGSplat reprojection and denoise frame structs.
+  \item Sketch a \path{GaussianMotionState} contract for midpoint synthesis:
+        position, velocity, covariance, opacity, visibility, and residual flow.
+  \item Identify the minimum benchmark clip needed to expose shimmer,
+        disocclusion, thin geometry, and moving-object ghosting.
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{nvidia2026dlss45}
+NVIDIA.
+\newblock DLSS 4.5 Dynamic Multi Frame Generation and Multi Frame Generation
+6X Available Now.
+\newblock March 31, 2026.
+\newblock \url{https://www.nvidia.com/en-us/geforce/news/dlss-4-5-dynamic-multi-frame-generation-6x-mode-released/}
+
+\bibitem{nvidia2026dlssdeveloper}
+NVIDIA Developer.
+\newblock NVIDIA DLSS.
+\newblock Accessed May 4, 2026.
+\newblock \url{https://developer.nvidia.com/rtx/dlss}
+
+\bibitem{nvidia2025dlss4}
+NVIDIA.
+\newblock NVIDIA DLSS 4 Introduces Multi Frame Generation and Enhancements for
+All DLSS Technologies.
+\newblock January 6, 2025.
+\newblock \url{https://www.nvidia.com/en-sg/geforce/news/dlss4-multi-frame-generation-ai-innovations/}
+
+\bibitem{nvidia2025dlss4research}
+NVIDIA Research.
+\newblock DLSS 4: Transforming Real-Time Graphics with AI.
+\newblock Technical report, 2025.
+\newblock \url{https://research.nvidia.com/labs/adlr/DLSS4/}
+
+\bibitem{nvidia2022dlss3}
+NVIDIA.
+\newblock Introducing NVIDIA DLSS 3.
+\newblock September 20, 2022.
+\newblock \url{https://www.nvidia.com/en-us/geforce/news/dlss3-ai-powered-neural-graphics-innovations/}
+
+\bibitem{amd2026fsr}
+AMD.
+\newblock AMD FSR Technologies.
+\newblock Accessed May 4, 2026.
+\newblock \url{https://www.amd.com/en/products/graphics/technologies/fidelityfx/super-resolution.html}
+
+\bibitem{intel2026xess}
+Intel.
+\newblock Intel XeSS Super Resolution Developer Guide 2.0.
+\newblock Accessed May 4, 2026.
+\newblock \url{https://www.intel.com/content/www/us/en/developer/articles/technical/xess-sr-developer-guide.html}
+
+\bibitem{yu2024mipsplat}
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger.
+\newblock Mip-Splatting: Alias-Free 3D Gaussian Splatting.
+\newblock CVPR, 2024.
+\newblock \url{https://openaccess.thecvf.com/content/CVPR2024/html/Yu_Mip-Splatting_Alias-free_3D_Gaussian_Splatting_CVPR_2024_paper.html}
+
+\bibitem{yan2024multiscale}
+Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee.
+\newblock Multi-Scale 3D Gaussian Splatting for Anti-Aliased Rendering.
+\newblock CVPR, 2024.
+\newblock \url{https://cvpr.thecvf.com/virtual/2024/poster/30347}
+
+\bibitem{liang2024analytic}
+Zhihao Liang, Qi Zhang, Wenbo Hu, Ying Feng, Lei Zhu, and Kui Jia.
+\newblock Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic
+Integration.
+\newblock arXiv:2403.11056, 2024.
+\newblock \url{https://arxiv.org/abs/2403.11056}
+
+\bibitem{steiner2025aaa}
+Michael Steiner, Thomas Koehler, Lukas Radl, Felix Windisch,
+Dieter Schmalstieg, and Markus Steinberger.
+\newblock AAA-Gaussians: Anti-Aliased and Artifact-Free 3D Gaussian Rendering.
+\newblock arXiv preprint, 2025.
+\newblock \url{https://tugraz.elsevierpure.com/en/publications/aaa-gaussians-anti-aliased-and-artifact-free-3d-gaussian-renderin/}
+
+\bibitem{yang2025lodgs}
+Zhenya Yang, Bingchen Gong, and Kai Chen.
+\newblock LOD-GS: Level-of-Detail-Sensitive 3D Gaussian Splatting for Detail
+Conserved Anti-Aliasing.
+\newblock arXiv:2507.00554, 2025.
+\newblock \url{https://papers.cool/arxiv/2507.00554}
+
+\bibitem{suh2026aasplat}
+Taewoo Suh, Sungpyo Kim, Jongmin Park, and Munchurl Kim.
+\newblock AA-Splat: Anti-Aliased Feed-forward Gaussian Splatting.
+\newblock arXiv:2603.29394, 2026.
+\newblock \url{https://papers.cool/arxiv/2603.29394}
+
+\bibitem{asthana2026splatsure}
+Pranav Asthana, Alex Hanson, Allen Tu, Tom Goldstein, Matthias Zwicker,
+and Amitabh Varshney.
+\newblock SplatSuRe: Selective Super-Resolution for Multi-view Consistent 3D
+Gaussian Splatting.
+\newblock CVPR, 2026.
+\newblock \url{https://splatsure.github.io/}
+
+\bibitem{chen2025gassr}
+Du Chen, Liyi Chen, Zhengqiang Zhang, and Lei Zhang.
+\newblock Generalized and Efficient 2D Gaussian Splatting for Arbitrary-scale
+Super-Resolution.
+\newblock arXiv:2501.06838, 2025.
+\newblock \url{https://huggingface.co/papers/2501.06838}
+
+\bibitem{wu2024dynamic4dgs}
+Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei,
+Wenyu Liu, Qi Tian, and Xinggang Wang.
+\newblock 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering.
+\newblock CVPR, 2024.
+\newblock \url{https://guanjunwu.github.io/4dgs/}
+
+\bibitem{duan2024rotor4dgs}
+Yuanxing Duan, Fangyin Wei, Qiyu Dai, Yuhang He, Wenzheng Chen, and Baoquan Chen.
+\newblock 4D-Rotor Gaussian Splatting: Towards Efficient Novel View Synthesis
+for Dynamic Scenes.
+\newblock 2024.
+\newblock \url{https://research.nvidia.com/publication/2024-02_4d-rotor-gaussian-splatting-towards-efficient-novel-view-synthesis-dynamic}
+
+\bibitem{li2023spacetime}
+Zhan Li, Zhang Chen, Zhong Li, and Yi Xu.
+\newblock Spacetime Gaussian Feature Splatting for Real-Time Dynamic View
+Synthesis.
+\newblock arXiv:2312.16812, 2023.
+\newblock \url{https://arxiv.org/abs/2312.16812}
+
+\bibitem{wang2026retimegs}
+Xuezhen Wang, Li Ma, Yulin Shen, Zeyu Wang, and Pedro V. Sander.
+\newblock RetimeGS: Continuous-Time Reconstruction of 4D Gaussian Splatting.
+\newblock CVPR, 2026.
+\newblock \url{https://william-wang2.github.io/RetimeGS/}
+
+\bibitem{lin2023gaussianflow}
+Youtian Lin, Zuozhuo Dai, Siyu Zhu, and Yao Yao.
+\newblock Gaussian-Flow: 4D Reconstruction with Dynamic 3D Gaussian Particle.
+\newblock arXiv:2312.03431, 2023.
+\newblock \url{https://huggingface.co/papers/2312.03431}
+
+\bibitem{gao2024gaussianflow}
+Quankai Gao, Qiangeng Xu, Zhe Cao, Ben Mildenhall, Wenchao Ma, Le Chen,
+Dahang Tang, and Ulrich Neumann.
+\newblock GaussianFlow: Splatting Gaussian Dynamics for 4D Content Creation.
+\newblock arXiv:2403.12365, 2024.
+\newblock \url{https://huggingface.co/papers/2403.12365}
+
+\bibitem{zhu2024motiongs}
+Ruijie Zhu, Yanzhe Liang, Hanzhi Chang, Jiacheng Deng, Jiahao Lu,
+Wenfei Yang, Tianzhu Zhang, and Yongdong Zhang.
+\newblock MotionGS: Exploring Explicit Motion Guidance for Deformable 3D
+Gaussian Splatting.
+\newblock arXiv:2410.07707, 2024.
+\newblock \url{https://huggingface.co/papers/2410.07707}
+
+\bibitem{liu2026kfgs}
+Qingyuan Tang, Yufei Yin, Yanming Zhu, Zhou Yu, Zhenzhong Kuang,
+Jiajun Ding, and Jifa He.
+\newblock KF-GS: Kalman Filter-Guided Gaussian Splatting for Real-Time
+High-Quality Dynamic Scene Reconstruction.
+\newblock Journal of Visual Communication and Image Representation, in press,
+2026.
+\newblock \url{https://www.sciencedirect.com/science/article/pii/S1047320326001100}
+
+\bibitem{kye2026acevfi}
+Dahyeon Kye, Changhyun Roh, Sukhun Ko, Chanho Eom, and Jihyong Oh.
+\newblock AceVFI: A Comprehensive Survey of Advances in Video Frame
+Interpolation.
+\newblock IEEE Transactions on Circuits and Systems for Video Technology,
+2026.
+\newblock \url{https://www.researchgate.net/publication/401799473_AceVFI_A_Comprehensive_Survey_of_Advances_in_Video_Frame_Interpolation}
+
+\end{thebibliography}
+
+\end{document}

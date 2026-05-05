@@ -24,6 +24,9 @@ option(VKGSPLAT_ENABLE_VULKAN
 option(VKGSPLAT_ENABLE_3DGS
     "Build the paused 3DGS renderer, viewer, and 3DGS-specific tests"
     OFF)
+option(VKGSPLAT_ENABLE_TORCH
+    "Build the optional PyTorch tensor extension for CUDA reconstruction kernels"
+    OFF)
 if(APPLE)
     set(VKGSPLAT_ENABLE_METAL_DEFAULT ON)
 else()
@@ -114,6 +117,7 @@ if(VKGSPLAT_ENABLE_CUDA)
 
     if(VKGSPLAT_ENABLE_3DGS)
         target_sources(vkgsplat PRIVATE
+            src/cuda/gaussian_reconstruction.cu
             src/cuda/rasterizer.cu
             src/cuda/tile_renderer.cu
         )
@@ -135,6 +139,26 @@ if(VKGSPLAT_ENABLE_CUDA)
         )
         target_compile_definitions(vkgsplat PUBLIC VKGSPLAT_ENABLE_CUDA_VULKAN_INTEROP=1)
     endif()
+endif()
+
+if(VKGSPLAT_ENABLE_TORCH)
+    if(NOT VKGSPLAT_ENABLE_CUDA OR NOT VKGSPLAT_ENABLE_3DGS)
+        message(FATAL_ERROR "VKGSPLAT_ENABLE_TORCH requires VKGSPLAT_ENABLE_CUDA=ON and VKGSPLAT_ENABLE_3DGS=ON")
+    endif()
+    find_package(Torch REQUIRED)
+    add_library(vkgsplat_torch MODULE
+        src/torch/gaussian_reconstruction_torch.cpp
+    )
+    target_link_libraries(vkgsplat_torch PRIVATE
+        vkgsplat
+        ${TORCH_LIBRARIES}
+        CUDA::cudart
+    )
+    target_include_directories(vkgsplat_torch PRIVATE ${TORCH_INCLUDE_DIRS})
+    target_compile_options(vkgsplat_torch PRIVATE ${TORCH_CXX_FLAGS})
+    set_target_properties(vkgsplat_torch PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "_vkgsplat_cuda")
 endif()
 
 # --- Apps ------------------------------------------------------------------

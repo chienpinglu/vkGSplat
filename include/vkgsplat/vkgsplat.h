@@ -3,7 +3,7 @@
 // vkGSplat — umbrella header. Application code can `#include
 // <vkgsplat/vkgsplat.h>` to pull in the public surface.
 //
-// The position paper (paper/vkGSplat.tex) and architecture notes
+// The position paper (papers/vkGSplat.tex) and architecture notes
 // (docs/architecture.md) are the canonical references for the design.
 #pragma once
 
@@ -36,6 +36,7 @@
 
 #if defined(VKGSPLAT_ENABLE_CUDA) && defined(VKGSPLAT_ENABLE_3DGS)
 #  include "cuda/rasterizer.h"
+#  include "cuda/gaussian_reconstruction.h"
 #  include "interop/external_memory.h"
 #  include "interop/timeline_semaphore.h"
 #endif

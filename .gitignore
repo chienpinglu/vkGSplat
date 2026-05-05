@@ -44,16 +44,16 @@ __pycache__/
 venv/
 
 # Paper
-paper/*.aux
-paper/*.log
-paper/*.out
-paper/*.toc
-paper/*.bbl
-paper/*.blg
-paper/*.synctex.gz
-paper/*.fls
-paper/*.fdb_latexmk
-paper/main.pdf
+papers/*.aux
+papers/*.log
+papers/*.out
+papers/*.toc
+papers/*.bbl
+papers/*.blg
+papers/*.synctex.gz
+papers/*.fls
+papers/*.fdb_latexmk
+papers/main.pdf
 
 # Assets (large binaries)
 assets/*.ply
@@ -65,6 +65,9 @@ docs/images/*.ppm
 third_party/TokenGS/
 third_party/WickedEngine/
 third_party/colmap/
+third_party/nvdiffrast/
+third_party/gsplat/
+third_party/diff-gaussian-rasterization/
 log.txt
 
 # OS
@@ -73,12 +76,12 @@ Thumbs.db
 .git.broken/
 
 # Paper build artifacts
-paper/.build/
-paper/.build.tmp/
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.toc
+papers/.build/
+papers/.build.tmp/
+papers/*.aux
+papers/*.bbl
+papers/*.blg
+papers/*.log
+papers/*.out
+papers/*.toc
 .git.broken-*/

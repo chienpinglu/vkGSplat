@@ -45,6 +45,14 @@ if(VKGSPLAT_ENABLE_VULKAN AND Vulkan_FOUND)
 endif()
 
 if(VKGSPLAT_ENABLE_CUDA AND VKGSPLAT_ENABLE_3DGS)
+    add_executable(test_cuda_gaussian_reconstruction test_cuda_gaussian_reconstruction.cu)
+    target_link_libraries(test_cuda_gaussian_reconstruction PRIVATE vkgsplat CUDA::cudart)
+    set_target_properties(test_cuda_gaussian_reconstruction PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_test(NAME test_cuda_gaussian_reconstruction COMMAND test_cuda_gaussian_reconstruction)
+    set_tests_properties(test_cuda_gaussian_reconstruction PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(test_cuda_tile_renderer test_cuda_tile_renderer.cu)
     target_link_libraries(test_cuda_tile_renderer PRIVATE vkgsplat CUDA::cudart)
     set_target_properties(test_cuda_tile_renderer PROPERTIES
