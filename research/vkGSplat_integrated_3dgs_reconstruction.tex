@@ -1456,6 +1456,60 @@ high-frequency shading residuals, difficult disocclusions, specular flicker,
 and perceptual anti-aliasing. It should not be responsible for discovering
 basic geometry or motion from scratch.
 
+\textbf{Operational placement.} The transformer is used only in the decode
+resolver, after the Gaussian state has already been updated and projected. It
+is not part of the prefill renderer, not part of Gaussian assignment/update, and
+not part of the visibility or radiance-cache acceptance gates. Those stages
+must remain inspectable CUDA kernels so the no-transformer baseline is always
+valid.
+
+\begin{center}
+\small
+\begin{tabular}{p{0.25\linewidth}p{0.18\linewidth}p{0.45\linewidth}}
+\toprule
+Pipeline stage & Transformer? & Reason \\
+\midrule
+Prefill/acquisition & No & Produce factual seed buffers: color, depth, IDs, normals, motion, and variance. \\
+Gaussian update/cache & No & Maintain geometry, visibility, radiance, confidence, and lifetime as explicit state. \\
+Feature projection & No model & Project Gaussian and engine features into tile/window tensors for the resolver. \\
+Decode resolver & Optional yes & Predict bounded residuals, confidence repair, SR detail, or disocclusion fill. \\
+Final composite & No & Apply residuals and masks to the analytic resolve with clamps and debug counters. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In kernel terms, the optional path is:
+
+\[
+\begin{gathered}
+\texttt{ProjectFeatures}
+\rightarrow \texttt{PackResolverTokens}
+\rightarrow \texttt{RunTransformerResolver}\\
+\rightarrow \texttt{CompositeResolverOutput}.
+\end{gathered}
+\]
+
+The token tensor can be written as
+
+\[
+  Z_t = \mathrm{PackTokens}(F_t,A_t,H_{t-k:t-1}),
+\]
+
+where $A_t$ is the current seed bundle and $H_{t-k:t-1}$ are motion-aligned
+history features. The resolver predicts bounded corrections:
+
+\[
+  (\Delta I_t,\Delta c_t,\Delta m_t)=T_\theta(Z_t),
+  \qquad
+  \hat I_t = I_{analytic} + \mathrm{clamp}(\Delta I_t).
+\]
+
+Here $\Delta c_t$ can adjust confidence and $\Delta m_t$ can repair masks or
+holes. The clamps are not cosmetic: they enforce that the transformer is a
+bounded decoder over explicit state, not the owner of geometry or temporal
+truth. Disabling the transformer should reduce to the analytic CUDA resolve
+without changing the prefill, Gaussian state, cache layout, or metrics.
+
 A practical transformer budget should be windowed and temporal-local rather
 than global full-frame attention. Full attention over $P$ pixels scales as
 $O(P^2)$ and is not a credible real-time starting point. Window attention with
@@ -3289,6 +3343,91 @@ state and good decode quality, invest the saved area in tensor/cache/paging
 instead. The burden of proof should be on adding legacy graphics area, not on
 removing the core tensor/cache path.
 
+\section{Appendix: Architectural Path Dependence}
+
+The deeper vkGSplat thesis is not only that 3DGS can run on tensor cores. It is
+that computer architecture is shaped by dominant paradigms, and then the
+resulting programmable substrate becomes available to later paradigms. A
+successful workload creates hardware pressure; hardware vendors respond with
+specialized but still programmable mechanisms; a different representation later
+discovers that those mechanisms are close to the right machine for its own
+needs.
+
+A compact form of the pattern is:
+
+\[
+\begin{gathered}
+\text{dominant paradigm}
+\rightarrow \text{hardware specialization}\\
+\rightarrow \text{programmable affordance}
+\rightarrow \text{new paradigm reuse}.
+\end{gathered}
+\]
+
+Historically, raster graphics did this first. The need to draw shaded triangles
+at high throughput justified programmable GPU shaders, high memory bandwidth,
+texture units, and massive data parallelism. Once exposed as a programmable
+substrate, that graphics-shaped machine became useful for scientific computing,
+deep learning, differentiable rendering, NeRFs, and other non-raster workloads.
+The hardware was motivated by graphics, but it did not remain confined to
+classical graphics.
+
+Transformer/LLM serving is now applying the same pressure in a different
+region of the design space. It justifies tensor engines, FP8/FP4 arithmetic,
+block-scaled quantization, KV-cache paging, high-bandwidth memory, large SRAM,
+continuous batching, and decode-oriented scheduling \cite{nvidia2022hopper,
+nvidia2026transformerenginefp8,nvidia2026nvfp4,kwon2023pagedattention,
+prabhu2025vattention}. These features are not graphics-specific, but they are
+surprisingly well matched to Gaussian-state reconstruction: tile-local feature
+projection, paged radiance caches, motion-aligned history, low-precision
+feature packets, sparse gather/reduce, and optional transformer decoding.
+
+\begin{center}
+\small
+\begin{tabular}{p{0.24\linewidth}p{0.32\linewidth}p{0.33\linewidth}}
+\toprule
+Dominant paradigm & Architecture it encourages & Later reuse \\
+\midrule
+Raster graphics & Programmable shaders, high bandwidth, texture access, SIMT execution & GPGPU, deep learning, differentiable rendering, neural fields \\
+Deep learning and LLMs & Tensor cores, FP8/FP4, HBM, SRAM, cache paging, batched decode & 3DGS feature projection, radiance cache, TAA/SR/framegen decode \\
+Stateful 3DGS reconstruction & Gaussian/tile pages, sparse updates, visibility-aware caches, narrow evidence prefill & Future digital twins, robotics SDG, neural-rendering accelerators \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For vkGSplat, the inversion is important. Graphics hardware helped create the
+GPU. AI then reshaped the GPU around tensor and cache workloads. Now a new
+graphics representation, 3D Gaussian Splatting, may benefit more from the
+AI-shaped architecture than from the older fixed-function graphics pipeline.
+3DGS is therefore not competing with LLM hardware. It is discovering that LLM
+hardware has already built much of the right substrate for stateful graphics
+reconstruction.
+
+This view also explains why vkGSplat should not begin by cloning a full legacy
+GPU. The prefill side still needs graphics-like evidence: visibility, depth,
+primitive identity, barycentrics, material hints, normals, and motion. But the
+decode side is where the architectural surplus lies. Gaussian state update,
+radiance-cache lookup, projected feature tokens, temporal reconstruction,
+super-resolution, and frame generation all map to the tensor/cache/paging
+machinery that LLM serving made economically inevitable.
+
+The appendix-level claim is therefore:
+
+\begin{quote}
+vkGSplat is an example of architectural path dependence. Transformer/LLM
+serving justifies hardware investment in tensor engines, low-precision
+arithmetic, cache paging, and high-throughput decode scheduling. Those
+investments then become programmable affordances for a different paradigm:
+Gaussian-state graphics reconstruction.
+\end{quote}
+
+The falsifiable version is the same as the hardware ablation in the main text.
+If a minimal evidence prefill plus strong tensor/cache decode beats a
+richer graphics prefill under equal area, bandwidth, or energy budgets, then
+vkGSplat is benefiting from LLM-shaped hardware. If richer prefill dominates,
+then the old graphics paradigm still owns the bottleneck. The interesting
+outcome is not ideological; it is the measured boundary where one dominant
+paradigm's hardware surplus becomes another paradigm's accelerator.
 
 \begin{thebibliography}{99}
 
