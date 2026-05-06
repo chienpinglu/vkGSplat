@@ -37,6 +37,9 @@
 #if defined(VKGSPLAT_ENABLE_CUDA) && defined(VKGSPLAT_ENABLE_3DGS)
 #  include "cuda/rasterizer.h"
 #  include "cuda/gaussian_reconstruction.h"
+#endif
+
+#if defined(VKGSPLAT_ENABLE_CUDA_VULKAN_INTEROP)
 #  include "interop/external_memory.h"
 #  include "interop/timeline_semaphore.h"
 #endif

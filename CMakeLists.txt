@@ -105,6 +105,11 @@ if(VKGSPLAT_ENABLE_VULKAN AND Vulkan_FOUND)
     )
     target_link_libraries(vkgsplat PUBLIC Vulkan::Vulkan)
     target_compile_definitions(vkgsplat PUBLIC VKGSPLAT_ENABLE_VULKAN=1)
+    if(WIN32)
+        target_compile_definitions(vkgsplat PUBLIC
+            VK_USE_PLATFORM_WIN32_KHR=1
+            NOMINMAX=1)
+    endif()
 endif()
 
 if(VKGSPLAT_ENABLE_CUDA)
@@ -114,6 +119,17 @@ if(VKGSPLAT_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
+    set(VKGSPLAT_CUDA_ARCHITECTURES "" CACHE STRING
+        "CUDA architectures to build; defaults include Blackwell when supported by the toolkit")
+    if(VKGSPLAT_CUDA_ARCHITECTURES STREQUAL "")
+        set(VKGSPLAT_CUDA_ARCHITECTURES 75 80 86 89 90)
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+            list(APPEND VKGSPLAT_CUDA_ARCHITECTURES 120)
+        endif()
+    endif()
+    set(CMAKE_CUDA_ARCHITECTURES "${VKGSPLAT_CUDA_ARCHITECTURES}" CACHE STRING
+        "CUDA architectures to build" FORCE)
 
     if(VKGSPLAT_ENABLE_3DGS)
         target_sources(vkgsplat PRIVATE
@@ -128,7 +144,7 @@ if(VKGSPLAT_ENABLE_CUDA)
             CUDA::cuda_driver
     )
     set_target_properties(vkgsplat PROPERTIES
-        CUDA_ARCHITECTURES "75;80;86;89;90"
+        CUDA_ARCHITECTURES "${VKGSPLAT_CUDA_ARCHITECTURES}"
     )
     target_compile_definitions(vkgsplat PUBLIC VKGSPLAT_ENABLE_CUDA=1)
 
@@ -186,4 +202,7 @@ else()
     message(STATUS "  Vulkan : OFF")
 endif()
 message(STATUS "  CUDA   : ${VKGSPLAT_ENABLE_CUDA}")
+if(VKGSPLAT_ENABLE_CUDA)
+    message(STATUS "  CUDA arch: ${VKGSPLAT_CUDA_ARCHITECTURES}")
+endif()
 message(STATUS "  Build  : ${CMAKE_BUILD_TYPE}")
