@@ -1,8 +1,8 @@
-% vkGSplat: A Compute-First Vulkan Path for Robotics Synthetic Data
+% Acquisition, Reconstruction, and World Models for Physical AI Data Generation
 % Position / vision paper draft (v0.1)
 % Target venue: HotOS-style position track, HPG, MLSys, or arXiv preprint.
 
-\documentclass[10pt,journal]{IEEEtran}
+\documentclass[10pt,journal,onecolumn]{IEEEtran}
 
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb}
@@ -18,6 +18,15 @@
 \usepgfplotslibrary{fillbetween}
 \pgfplotsset{compat=1.18}
 
+% Academic paragraph convention: keep normal paragraph indentation, but do not
+% indent the first paragraph after section-like headings.
+\makeatletter
+\let\vkgsplat@afterheading\@afterheading
+\def\@afterheading{%
+  \@afterindentfalse
+  \vkgsplat@afterheading}
+\makeatother
+
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 \newcommand{\note}[1]{\textcolor{blue}{[NOTE: #1]}}
 \definecolor{plotblue}{RGB}{30,144,255}
@@ -26,7 +35,7 @@
 \definecolor{plotyellow}{RGB}{235,180,35}
 \definecolor{plotred}{RGB}{210,70,70}
 
-\title{vkGSplat: A Compute-First Vulkan Path for\\Physical AI World Simulation and Synthetic Data Generation}
+\title{Acquisition, Reconstruction, and World Models:\\A Compute-First Architecture for Physical AI Data Generation}
 
 \author{%
     Chien-Ping Lu\\[0.35em]
@@ -37,151 +46,229 @@
 \maketitle
 
 \begin{abstract}
-Modern robotics increasingly depends on synthetic data generated inside
-photorealistic digital twins. The dominant pipelines --- NVIDIA Isaac~Sim
-\slash Omniverse, Cosmos, BlenderProc, Kubric --- bind the rendering layer to
-graphics-optimized silicon: GPUs with rasterizers, ROPs, and ray-tracing
-cores. We argue that this binding is incidental rather than fundamental.
-The trend is already visible inside graphics itself: the GPU has evolved
-from a fixed-function graphics processor into a programmable graphics,
-scientific-computing, and AI platform~\cite{dally2021gpu}, while DLSS and
-its peers have shifted the center of gravity of real-time rendering from
-fixed-function graphics units to \emph{tensor compute}. In this newer
-model, the rasterizer and RT cores increasingly act as an
-\emph{acquisition} stage that produces low-resolution, temporally and
-spatially sparse measurements; neural and classical reconstruction then
-upscales, denoises, anti-aliases, and
-interpolates~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,schied2017svgf,bitterli2020restir}.
-Synthetic data generation (SDG) is a \emph{throughput-bound,
-latency-tolerant} workload, and its rendering quality requirements --- while
-non-trivial --- are met by published compute-only techniques (software
-rasterization, GPU ray traversal, 3D Gaussian splatting) that do not require
-fixed-function graphics hardware. We propose \textbf{vkGSplat}: a Vulkan
-implementation in which the API surface is preserved as a portable contract,
-but the backend is a software renderer expressed in CUDA-class compute. The
-near-term motivation is access: data-center AI accelerators (H100, B200, AI
-chips such as TPU and Trainium) are over an order of magnitude more available,
-in aggregate FLOPS and procurement velocity, than RTX-class workstation
-silicon. The longer-term motivation is portability: decoupling the API from
-the silicon turns digital-twin pipelines into a software problem with a clean
-backend interface. We present the system design, situate it relative to
-existing software-Vulkan implementations (SwiftShader, Mesa Lavapipe), justify
-3D Gaussian Splatting as the v1 renderer, and lay out an evaluation plan for
-throughput, energy, and downstream sim-to-real task accuracy. As a
-design target, we aim for \textbf{$\geq 100$ images\slash s\slash H100} at
-$1024{\times}1024$ from a captured 3DGS scene, \textbf{$\leq 0.5$ J\slash
-image} on H100-class hardware, and \textbf{within $2{\times}$ of an
-RTX-class graphics-hardware baseline (L40) on dollars per image} ---
-benchmarked against Isaac~Sim and BlenderProc on identical scene
-geometry. These targets are extrapolations from published 3DGS
-throughput on RTX-class hardware~\cite{kerbl20233dgs} and from the
-software-rasterization literature~\cite{laine2011software}; achieving
-them is the v1 falsifiable claim.
+\setlength{\parindent}{0pt}
+\noindent
+Physical AI needs enormous amounts of data, but the field is caught between two
+imperfect stories. Classical simulation promises physical correctness but is
+expensive, graphics-hardware-bound, and difficult to scale across AI
+accelerator fleets. Generative world models promise cheap interactive futures,
+but their predictions are only physical inside a validated envelope. This paper
+argues for a third architecture: \emph{physical acquisition plus explicit state
+plus scalable reconstruction and prediction}. Calibrated simulators, sensors,
+and low-sample path tracers provide sparse physical evidence; persistent 3D/4D
+state stores geometry, radiance, motion, visibility, variance, and confidence;
+classical filters, Gaussian splatting, and neural/world-model components then
+denoise, supersample, interpolate, predict, and propose counterfactuals. The
+system returns to a physical or sensor oracle when uncertainty, rare events, or
+task risk exceed the learned model's validation envelope.
+This framing explains several otherwise separate trends. DLSS-class rendering
+already treats rasterization and ray tracing as sparse acquisition followed by
+tensor-side reconstruction~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,nvidia-dlss35rr}.
+Robotics SDG is throughput-bound and latency-tolerant, so it can trade
+fixed-function graphics latency for compute portability. More importantly, SDG
+has an amortized world-building phase that games do not: it can spend seconds,
+minutes, or hours establishing static geometry, materials, lighting priors,
+BVHs, Gaussian maps, and high-bounce radiance caches before running many
+simulation and acquisition episodes. World-model systems
+such as Genie and Cosmos are compatible with, rather than replacements for,
+calibrated physics and sensors when they act as priors, rollout generators, or
+proposal mechanisms~\cite{ha2018,bruce2024,deepmind2024genie2,nvidia2024cosmos}.
+We use \textbf{vkGSplat} as the reference implementation of this philosophy. The
+architecture is acquisition-backend neutral: a conventional Vulkan renderer on
+graphics hardware is a valid and often best acquisition oracle. vkGSplat adds a
+compute-first Vulkan path that preserves the API as a portable application
+contract while lowering visual acquisition and reconstruction to CUDA-class
+kernels. The CUDA software path is useful when data generation, reconstruction,
+training, and world-model inference should remain on tensor-rich accelerators,
+or when the renderer must expose custom sample statistics and explicit Gaussian
+state updates. vkGSplat is not the whole thesis; it is the concrete test of
+whether physical-evidence acquisition, explicit Gaussian state, PyTorch-centered
+orchestration, and tensor-rich hardware can form a practical data-generation
+substrate. As a falsifiable system target, we aim for \textbf{$\geq 100$
+images\slash s\slash H100} at $1024{\times}1024$ from a captured 3DGS scene,
+\textbf{$\leq 0.5$ J\slash image} on H100-class hardware, and
+\textbf{within $2{\times}$ of an RTX-class graphics-hardware baseline (L40) on
+dollars per image}, while preserving downstream sim-to-real task accuracy.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Synthetic data generation, Vulkan, software rendering, 3D Gaussian splatting,
-digital twins, robotics, AI accelerators.
+Physical AI, synthetic data generation, world models, acquisition and
+reconstruction, Vulkan, software rendering, 3D Gaussian splatting, robotics, AI
+accelerators.
 \end{IEEEkeywords}
 
 % =====================================================================
 \section{Introduction}
 % =====================================================================
 
-Two trends are colliding. First, robotics has become a data-hungry
-discipline: end-to-end visuomotor policies, foundation models for
-manipulation, and autonomy stacks all require enormous quantities of
-labeled visual data, and an increasing fraction of that data is
-\emph{synthetic} --- rendered inside high-fidelity simulators
-\cite{tobin2017domain,greff2022kubric,denninger2019blenderproc,deitke2022procthor}.
-Second, the silicon supply chain has bifurcated: AI accelerators
-(NVIDIA~H100\slash B200, Google~TPU, AWS Trainium, and a long tail of
-emerging chips) are scaling FLOPS and memory bandwidth at a pace that
-outstrips the workstation-class GPUs traditionally used for graphics, and
-they dominate procurement budgets at every hyperscaler.
+Physical AI data generation is often framed as a choice between two extremes.
+One extreme is calibrated simulation: physics engines, path tracers, sensor
+models, and digital twins that try to measure the virtual world with known error
+bars. The other extreme is learned world modeling: generative systems that
+predict plausible futures, transform scenes, and create interactive rollouts
+without explicitly replaying every physical process. Both are necessary, and
+neither is sufficient alone. Physics without reconstruction is too expensive to
+scale; generation without physical acquisition can drift away from the regimes
+where robotics needs trust.
 
-The collision is awkward. Today's leading SDG stacks --- NVIDIA
-Omniverse\slash Isaac~Sim\slash Replicator and Cosmos
+This paper takes a different position. The right unit of design is not a
+renderer, a simulator, or a world model by itself. It is an
+\emph{acquisition--state--reconstruction loop}. A calibrated simulator,
+physical sensor, rasterizer, or low-sample path tracer acquires sparse evidence
+about the world. An explicit state representation stores that evidence across
+space, time, views, modalities, uncertainty, and task context. Reconstruction
+and world-model modules then denoise, supersample, interpolate, fill missing
+views, predict futures, and propose counterfactuals. When the state is
+under-supported --- low sample count, shallow path-depth evidence, high
+variance, disocclusion, distribution shift, or safety-critical task risk --- the
+system returns to a physical or sensor oracle. Put simply: AI should reduce the
+cost of acquiring, storing, reconstructing, and querying physical truth; it
+should not silently replace physical truth.
+
+This loop also changes the time structure of rendering. A game renderer must
+rebuild enough of the world to satisfy the next display frame. A SDG system can
+first build a world model: static geometry, materials, light-transport priors,
+BVHs, 3DGS state, and sensor calibration can be computed with generous budgets
+before any policy rollout or synthetic camera trajectory begins. The online
+simulation loop then updates dynamic state --- robot motion, movable objects,
+contact, deformables, light changes, material edits, and occlusions --- against
+that amortized static base. This is a qualitative difference, not merely a
+slower frame budget. It means vkGSplat should optimize the whole lifecycle,
+not just per-frame rendering.
+
+Modern graphics already points in this direction. In DLSS-class real-time
+pipelines, rasterization and ray tracing increasingly produce only a
+low-resolution, temporally jittered, spatially sparse seed. Tensor-side
+reconstruction performs super-resolution, anti-aliasing, denoising, and frame
+generation~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3}. Ray Reconstruction makes
+the same point for path-traced lighting: sparse physical rays acquire evidence,
+then a neural model reconstructs the missing samples~\cite{nvidia-dlss35rr}.
+The important lesson for Physical AI is not that a denoiser is magically
+physical. It is that low-sample acquisition can remain grounded in the correct
+transport process while reconstruction amortizes the cost. Lowering samples per
+pixel preserves the target integral in expectation; lowering bounce depth
+changes the physical model and must be tracked as bias.
+
+World-model research fits the same loop when its role is stated carefully.
+Classical world models learn compact predictive dynamics for control
+\cite{ha2018}; Genie-style and Cosmos-style systems scale toward interactive or
+generative environments for embodied agents
+\cite{bruce2024,deepmind2024genie2,nvidia2024cosmos}. These models can replace
+many expensive simulator calls inside a validation envelope: rollouts,
+variations, priors, proposals, and counterfactuals. They should not replace the
+calibrated physics, sensor, or rendering oracle when the output is a measurement
+whose errors matter. A useful world model proposes; the acquisition oracle
+checks, refreshes, or corrects when confidence is weak.
+
+The hardware implication is just as important. A generic architecture should
+allow visual acquisition to come from the best available source: a physical
+camera, an offline path tracer, a conventional Vulkan renderer running on
+graphics hardware, or a software renderer running on AI compute. Today's leading
+SDG stacks --- NVIDIA Omniverse\slash Isaac~Sim\slash Replicator and Cosmos
 \cite{nvidia2024cosmos}, Unreal-based platforms, Blender-based pipelines
-\cite{denninger2019blenderproc,greff2022kubric} --- are built on graphics
-APIs (Vulkan, D3D12, Metal, OpenGL) whose performant implementations
-require dedicated graphics silicon: rasterizer pipelines, ROPs, RT cores.
-The data-center accelerators that companies actually have are largely
-graphics-blind: an H100 has no RT cores, and TPUs and Trainium have no
-graphics pipeline at all. Generating training data on the chips one
-already owns therefore requires either (a) provisioning a separate fleet
-of graphics GPUs or (b) abandoning the graphics-API ecosystem in favor of
-custom rendering harnesses, which fragments the tooling.
+\cite{denninger2019blenderproc,greff2022kubric} --- usually use the hardware
+Vulkan or RTX path, and that is the right baseline when those GPUs are available
+and co-location is not a concern. The open question is whether the same
+acquisition contract can also execute efficiently on tensor-rich AI accelerators
+(NVIDIA~H100\slash B200, Google~TPU, AWS Trainium, and related chips), which
+dominate FLOPS, memory bandwidth, model deployment, and procurement. If
+acquisition is a sparse seed and reconstruction is the scalable value center,
+then a compute-first implementation becomes plausible. The question is not
+whether graphics hardware disappears, but when the Vulkan execution contract
+should be allowed to move off fixed-function graphics units.
 
-This paper takes the position that this fragmentation is unnecessary.
-Vulkan is a clean, modern, vendor-neutral API. There is no fundamental
-obstacle to implementing it as a \emph{software renderer expressed in
-compute kernels}, lowering rasterization, ray tracing, and shadow mapping
-to general-purpose accelerator compute. Software Vulkan implementations
-already exist (SwiftShader~\cite{swiftshader}, Mesa
-Lavapipe\slash llvmpipe~\cite{mesa-lavapipe}), but they target CPUs for
-correctness and conformance, not GPUs for throughput; they do not exploit
-the parallelism of AI accelerators, and they have not been engineered for
-SDG workloads. We propose to fill that gap.
+There is also a blunt economic motivation. The AI data center has become a
+hundred-billion-dollar capital program: Microsoft described an approximately
+\$80B FY2025 investment in AI-enabled datacenters, Alphabet guided to roughly
+\$75B of 2025 capital expenditures, and Meta raised its 2025 capital-expenditure
+outlook to \$70--72B while warning that 2026 growth would be driven primarily by
+infrastructure costs~\cite{microsoft-ai-datacenter-2025,alphabet-q4-2024-capex,meta-q3-2025-capex}.
+Industry analysts describe the same pressure at the data-center level: Omdia's
+Data Center World 2026 material frames the period as a ``trillion dollar''
+AIDC boom, estimates \$6.07T of total IT spending in 2026, reports that
+72.9\% of surveyed organizations expect IT-budget growth in 2026, and projects
+data-center investment approaching \$1.9T by 2030 under a 20\% CAGR scenario
+\cite{omdia-dcw-oas-2026}. The implication is that SDG architecture must fit a
+capital program that is already large, power-constrained, and operations-heavy.
+In that world, the goal is not to beat NVIDIA's RTX approach on its own terms.
+RTX/Omniverse/Isaac-style SDG is the natural baseline when a graphics fleet is
+already the production substrate. The problem is that many organizations are
+already locked into a massive AIDC buildout, and disrupting that buildout to add
+a parallel graphics island is economically and operationally expensive. The
+economic bet behind vkGSplat is therefore simpler: make synthetic data
+generation a normal AI data-center workload, scheduled, containerized,
+monitored, billed, and optimized on the same accelerator fleet that already runs
+training and inference.
 
-The argument has, in fact, already been made by the
-graphics-hardware industry's own roadmap. In modern real-time pipelines
-exemplified by NVIDIA DLSS~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3},
-the rasterizer and RT cores no longer produce the final image: they
-produce a \emph{low-resolution, temporally jittered, spatially sparse,
-under-sampled path-traced seed}. The rest of the pipeline ---
-super-resolution, anti-aliasing, denoising, frame
-interpolation~\cite{schied2017svgf,chaitanya2017interactive,nvidia-nrd},
-and importance-resampled direct illumination~\cite{bitterli2020restir} ---
-runs on tensor units. Each generation of DLSS shrinks the seed and
-expands the neural reconstruction. \emph{The center of gravity of the
-real-time rendering pipeline has already moved off fixed-function
-graphics hardware and onto tensor compute.} What we propose is the
-logical next step: if the AI portion is doing the heavy lifting, replace
-the fixed-function seed generator with a software-rendered seed produced
-on the same tensor-rich silicon, and eliminate the dependence on
-graphics-specific units altogether. For SDG, where real-time interaction
-is unnecessary, this trade is straightforward.
+This also reframes the comparison with NVIDIA's ecosystem. NVIDIA has a
+powerful heterogeneous answer: Omniverse and OVX systems for physically
+realistic simulation, graphics, and industrial digital twins, and DGX/DGX Cloud
+for AI-factory training and inference~\cite{nvidia-ovx,nvidia-dgx-cloud}. That
+split is technically coherent, and it is the correct reference architecture for
+sites that can justify a dedicated graphics/simulation cluster beside the AI
+cluster. vkGSplat argues for the other branch of the decision tree: a unified
+software-defined SDG stack that reuses the massive compute resources already
+being installed for AI data centers. The point is not that Omniverse, OVX, or
+RTX are weak. The point is that two specialized clusters create a second
+economic surface: separate capital planning, utilization targets, power and
+cooling envelopes, driver stacks, job schedulers, telemetry, and data movement
+between simulation and training. A compute-first Vulkan path is attractive
+precisely because it tries to collapse that split into one programmable AI
+infrastructure substrate.
 
-This does not require vkGSplat to clone DLSS. DLSS is the precedent that
-motivates moving reconstruction work onto compute, not a required
-implementation dependency. The near-term vkGSplat stack now prioritizes
-Vulkan/SPIR-V capture, low-sample ray-tracing seed frames, classical
-temporal reprojection, history rejection, TAA, and denoising. 3D
-Gaussian Splatting remains an optional backend and research
-representation, but it is not on the default implementation path. A
-learned DLSS-like temporal reconstruction model is reserved for optional
-later research if these deterministic passes prove insufficient.
+\textbf{vkGSplat} is the concrete reference implementation for this broader
+architecture. It preserves Vulkan as an application boundary, treats hardware
+Vulkan output as a first-class acquisition source, and adds a CUDA software path
+for seed generation and reconstruction when the pipeline benefits from AI-compute
+co-location. It also explores persistent 3D/4D Gaussian state as an explicit
+memory for physical evidence. The paper therefore has two layers. The first is
+the philosophy: Physical AI data generation should combine calibrated
+acquisition, explicit state, learned reconstruction, and uncertainty-gated oracle
+refresh. The second is the system: vkGSplat tests whether this philosophy can be
+implemented as a compute-first Vulkan path on AI accelerators.
 
-\textbf{Relation to the Gaussian reconstruction note.} This paper should
-not carry the full 3DGS reconstruction argument. Its role is to define
-the compute-first Vulkan/SDG system boundary: application capture,
-software acquisition, seed buffers, backend portability, and the
-hardware-allocation thesis. The companion technical note on integrated 3DGS reconstruction owns the
-question of whether one persistent 3D/4D Gaussian state can unify Monte
-Carlo denoising, radiance caching, temporal AA, super-resolution, and
-frame interpolation. In other words, this paper treats 3DGS as a
-backend and possible reconstruction representation; the companion note
-works out the Gaussian-state math and CUDA experiments.
+\textbf{Relation to the Gaussian reconstruction note.} This paper defines the
+world-modeling and compute-first SDG system boundary: physical acquisition,
+backend-neutral visual acquisition, hardware Vulkan ingestion, software CUDA seed
+buffers, explicit state, world-model compatibility, backend portability, and the
+hardware-allocation thesis. The companion technical
+note on integrated 3DGS reconstruction owns the detailed question of whether one
+persistent 3D/4D Gaussian state can unify Monte Carlo denoising, radiance
+caching, temporal AA, super-resolution, and frame interpolation. In other words,
+this paper treats 3DGS as an explicit-state bridge and possible reconstruction
+representation; the companion note works out the Gaussian-state math and CUDA
+experiments.
 
-\textbf{Contributions.} This is a position paper introducing the
-\textbf{vkGSplat} project. We make six claims:
+\textbf{Contributions.} This is a position paper about Physical AI data
+generation, with \textbf{vkGSplat} as the reference system. We make nine claims:
 
 \begin{enumerate}
+    \item \textbf{World-modeling philosophy.} Physical AI data generation
+    should be organized as physical acquisition, explicit state, scalable
+    reconstruction or prediction, and uncertainty-gated oracle refresh. Learned
+    world models can replace simulator calls inside a validation envelope, but
+    calibrated physics and sensor models remain the measurement authority
+    (Sections~\ref{sec:physical-sim-sensors} and~\ref{sec:pytorch-world-hub}).
+
     \item \textbf{Graphics model.} Modern graphics is no longer best
     understood as a monolithic raster pipeline. It is an acquisition
     front-end --- primary visibility, shadow or light visibility,
     secondary visibility, depth, motion, and sparse radiance --- followed
-    by reconstruction. This is the architectural reason a Vulkan program
-    can be lowered to compute kernels without changing its role in the
-    SDG stack (Section~\ref{sec:acqrec}).
+    by reconstruction. Much of the programmable work already behaves like
+    screen-space compute over G-buffers and history buffers; graphics shaders
+    are pipeline-scheduled kernels, while compute shaders expose explicit
+    load/store, workgroup, and user-defined data-layout control. vkGSplat moves
+    one step further by lifting reconstruction out of screen space into
+    persistent 3D/4D Gaussian, radiance-cache, and world-state address spaces
+    (Section~\ref{sec:acqrec}).
 
     \item \textbf{Allocation law.} The modernized Amdahl argument says
     that fixed-function specialization faces a finite collapse threshold
-    when the value-scalable fraction of a workload grows. In vkGSplat,
-    bounded visibility becomes acquisition, while reconstruction remains
-    the scalable stage that should stay on programmable compute
-    (Section~\ref{sec:amdahl-main} and Appendix~\ref{app:amdahl}).
+    when the value-scalable fraction of a workload grows. Bounded
+    visibility becomes acquisition, while reconstruction, prediction, and
+    world-model inference remain scalable stages that should stay on
+    programmable compute (Section~\ref{sec:amdahl-main} and
+    Appendix~\ref{app:amdahl}).
 
     \item \textbf{Workload.} Robotics SDG is throughput-bound and
     latency-tolerant. A renderer that produces images in tens to hundreds
@@ -190,10 +277,29 @@ works out the Gaussian-state math and CUDA experiments.
     forced the use of fixed-function graphics hardware
     (Section~\ref{sec:workload}).
 
-    \item \textbf{API decoupling.} The Vulkan API can be preserved as the
-    application contract while the implementation is replaced by a
-    compute-only software renderer. We outline the architecture of such
-    an implementation (Section~\ref{sec:design}).
+    \item \textbf{Economic packaging.} The goal is not primarily to beat
+    RTX-class SDG on per-ray or per-frame graphics efficiency. It is to package
+    SDG as a normal AI data-center workload whenever the organization already
+    operates large AI accelerator fleets and cannot economically disrupt that
+    buildout with a separate graphics island. The relevant comparison is fleet
+    procurement, utilization, software qualification, data movement, cluster
+    scheduling, and organizational fit (Section~\ref{sec:economic-case}).
+
+    \item \textbf{World-building lifecycle.} SDG differs from games not only
+    quantitatively but qualitatively: an expensive static world-building phase
+    can be amortized over many later simulation and acquisition episodes.
+    Geometry, materials, acceleration structures, high-bounce light transport,
+    Gaussian maps, and radiance caches can be built before simulation begins,
+    while dynamic lights, objects, and materials become explicit invalidation
+    and refresh events rather than per-frame renderer obligations
+    (Section~\ref{sec:world-building-lifecycle}).
+
+    \item \textbf{Reference implementation.} vkGSplat preserves Vulkan as the
+    application contract, accepts hardware Vulkan as a valid acquisition path,
+    and adds a compute-first software acquisition and reconstruction backend.
+    The point is not merely software rendering, but an explicit bridge between
+    physical evidence, Gaussian state, and tensor-side reconstruction
+    (Section~\ref{sec:design}).
 
     \item \textbf{Ray-tracing seed path before 3DGS.}
     The active v1 implementation targets low-sample, Vulkan-ray-tracing
@@ -210,7 +316,7 @@ works out the Gaussian-state math and CUDA experiments.
     sufficient compute and memory bandwidth (Section~\ref{sec:backends}).
 \end{enumerate}
 
-\textbf{System goals.} The implementation goal is not merely to run a
+\textbf{Reference implementation goals.} The implementation goal is not merely to run a
 toy renderer on CUDA; it is to make existing Vulkan programs and
 compute backends coexist behind one stable contract. Concretely, vkGSplat
 aims to:
@@ -464,6 +570,43 @@ pass is a reconstruction kernel. Vulkan remains the application-level
 description of the work, but the implementation no longer has to be a
 hardware raster pipeline.
 
+\subsection{Graphics shaders as restricted compute}
+
+The word ``graphics'' can obscure where modern rendering time actually goes.
+On contemporary GPUs, the large programmable resource is the shader/SIMT
+execution fabric plus memory hierarchy; fixed-function raster, texture, ROP,
+and RT blocks are specialized accelerators around that fabric, not a separate
+universe of computation. Exact die-area ratios are vendor-specific and usually
+not public, but architecturally the trend is clear: graphics pipelines have
+accumulated more programmable shader work, more full-screen passes, more
+temporal history, and more tensor-side reconstruction. The classic
+fixed-function stages increasingly acquire and organize evidence; the expensive
+value-building stages are kernels over buffers.
+
+In this sense, a graphics shader is already a restricted compute kernel. A
+vertex, mesh, fragment, ray-generation, closest-hit, or miss shader is ordinary
+program code launched over a pipeline-defined domain: vertices, primitives,
+fragments, rays, or samples. Its memory interface and scheduling are constrained
+by the graphics pipeline, and historically many writes are mediated through
+attachments, interpolation, blending, depth/stencil, or descriptor resources.
+A compute shader exposes the next degree of freedom: explicit workgroups,
+shared memory, storage buffers, storage images, arbitrary load/store, and
+user-defined data layouts. Many modern graphics effects exploit exactly that
+freedom: tiled lighting, SSAO, SSR, denoisers, TAA, temporal upscalers, particle
+updates, culling, skinning, visibility compaction, and neural reconstruction
+are already screen-space or buffer-space compute passes.
+
+vkGSplat pushes the same migration one step further. It does not merely replace
+a fragment pass with a compute pass over the same screen-space image. It asks
+whether the renderer's evidence should live in richer address spaces:
+world-space Gaussian state, 4D motion state, path-space radiance caches,
+material and primitive epochs, tile pages, and uncertainty buffers. Screen-space
+compute treats the image as the main memory of the renderer. vkGSplat treats the
+image as one projection of a persistent physical-evidence state. That is the
+stronger meaning of ``compute-first'': the software stack is no longer limited
+to framebuffer-sized arrays or pipeline-defined shader invocations, even though
+it can still ingest ordinary Vulkan graphics output as an acquisition source.
+
 \subsection{Real and synthetic images share the same reconstruction
 contract}
 
@@ -482,12 +625,127 @@ The source-specific difference is therefore not that one pipeline
 produces ``images'' and the other produces ``graphics.'' Both are
 acquisition pipelines followed by reconstruction. The only difference is
 where the acquisition comes from: a physical camera observing the real
-world, or a renderer observing a simulated world. This reframing is
-central to vkGSplat. If synthetic acquisition can be implemented as
-software visibility and sampling kernels, then the reconstruction path
---- temporal reprojection, history rejection, denoising, super-resolution,
-and eventually learned reconstruction --- can live entirely on the same
-compute substrate used for training and inference.
+world, a hardware Vulkan renderer observing a simulated world through graphics
+units, an offline path tracer, or a software renderer observing the same
+simulated world through CUDA kernels. This reframing is central to vkGSplat. If
+synthetic acquisition can be represented by a common seed-buffer contract, then
+the reconstruction path --- temporal reprojection, history rejection, denoising,
+super-resolution, and eventually learned reconstruction --- can consume either
+hardware-produced or software-produced evidence. The CUDA software path is the
+unique vkGSplat bet, but it is not the only valid acquisition source.
+
+\subsection{Acquisition backends: hardware Vulkan and CUDA software}
+\label{sec:acquisition-backends}
+
+The acquisition--reconstruction philosophy is deliberately backend-neutral. A
+Vulkan graphics pipeline running on RTX-class hardware is a first-class way to
+produce physical or synthetic visual evidence. In many deployments it is the
+right answer: it has mature drivers, high raster and ray-tracing throughput,
+hardware texture filtering, mature debugging tools, and broad application
+compatibility. A vkGSplat system should therefore be able to ingest hardware
+Vulkan outputs directly: color, depth, motion vectors, primitive IDs, material
+IDs, G-buffer attributes, sparse radiance buffers, and sample statistics when the
+renderer exposes them.
+
+The CUDA software rasterizer is a different point in the design space, not a
+claim that graphics hardware is obsolete. Its benefits are strongest when the
+consumer is an AI pipeline rather than a display pipeline:
+\begin{enumerate}
+  \item \textbf{Hardware access and fleet utilization.} H100/B200-class
+        accelerators may be available where RTX/L40-class graphics GPUs are not.
+  \item \textbf{Co-location with reconstruction and training.} Seed generation,
+        Gaussian-state updates, denoising, neural resolving, and policy or
+        world-model training can stay in CUDA/PyTorch memory without repeated
+        graphics-queue interop or host readback.
+  \item \textbf{Programmable evidence.} The renderer can emit exactly the
+        metadata the reconstructor needs: path-depth statistics, variance,
+        confidence, primitive/material IDs, visibility gates, and per-sample
+        provenance.
+  \item \textbf{Deterministic offline scheduling.} SDG can batch cameras,
+        worlds, and samples for throughput, reproducibility, and adaptive oracle
+        refresh rather than optimizing a 16-ms interactive frame.
+  \item \textbf{Portability to non-graphics accelerators.} A tile- and
+        tensor-friendly software contract can later be lowered to SYCL, Triton,
+        XLA, or Neuron-style backends where no Vulkan graphics queue exists.
+\end{enumerate}
+
+This makes the comparison more precise. Hardware Vulkan is the baseline and often
+the oracle for conventional rendering performance. CUDA software acquisition is
+valuable when the marginal cost of leaving the AI accelerator, losing custom
+metadata, or provisioning a separate graphics fleet exceeds the efficiency of
+fixed-function graphics hardware. The paper's system claim is therefore not
+``software rasterization always wins,'' but ``Physical AI data generation should
+expose a common acquisition contract, and vkGSplat tests the software-CUDA point
+on that contract.''
+
+\subsection{Physical simulation and sensor modeling are orthogonal}
+\label{sec:physical-sim-sensors}
+
+For Physical AI, the acquisition--reconstruction split has a sharper
+meaning: physical realism must be produced at acquisition time. A
+Gaussian state can preserve, fuse, denoise, and reconstruct evidence,
+but it cannot create physical truth that was never simulated or
+measured. Contact impulses, joint torques, IMU bias, rolling-shutter
+readout, LiDAR dropout, multipath, exposure, lens distortion, and
+material-dependent sensor response are not consequences of 3D Gaussian
+Splatting. They belong to the physical simulator and the sensor model.
+
+This makes physical simulation and sensor modeling orthogonal to the
+GSplat reconstruction backend. Let $S_t$ denote the physical simulation
+state: articulated poses, velocities, contact state, mass, friction,
+lighting, materials, and environment state. Let $Q_s$ denote the
+calibrated acquisition model for sensor $s$, with calibration $C_s$ and
+noise or corruption variables $\eta_s$. The sensor evidence is
+\begin{equation}
+  A_{s,t} = Q_s(S_t, C_s, \eta_s),
+  \label{eq:sensor-acquisition}
+\end{equation}
+while the reconstruction backend consumes that evidence through a
+persistent state update
+\begin{equation}
+  \mathcal{G}_t = U(\mathcal{G}_{t-1}, \{A_{s,t}\}_s).
+  \label{eq:gs-reconstruction-update}
+\end{equation}
+The former equation is about physical and sensor correctness; the latter
+is about efficient representation, temporal reuse, uncertainty tracking,
+and reconstruction. They should share timestamps, coordinate frames,
+calibration, primitive or semantic IDs, and confidence estimates, but
+they should not be collapsed into one algorithmic claim.
+
+This is consistent with the organization of robotics simulators. Isaac
+Sim is presented as a robotics simulation and synthetic-data platform,
+while its physics-based sensors are documented separately from rendering:
+they access physics properties such as mass and velocity after the
+render step and can be paired with noise models~\cite{nvidia-isaacsim,
+nvidia-isaac-physics-sensors}. The same separation should hold in
+vkGSplat. RGB, depth, LiDAR, radar, event cameras, IMU, joint, and
+contact sensors each require their own $Q_s$. GSplat reconstruction can
+then act as a fast measured-state cache for visual and geometric sensor
+evidence, with uncertainty gates that fall back to exact physics,
+ray/path tracing, or a reference sensor simulator when the Gaussian
+state is underspecified.
+
+The design consequence is simple. The master vkGSplat architecture owns
+three separable layers:
+\begin{enumerate}
+  \item \textbf{Physical simulation:} dynamics, contacts, materials,
+        lights, robot state, and scene evolution.
+  \item \textbf{Sensor acquisition:} camera optics, exposure, rolling
+        shutter, LiDAR/radar scan timing, noise, dropout, quantization,
+        calibration, and sensor-specific failure modes.
+  \item \textbf{GSplat reconstruction:} persistent Gaussian state,
+        confidence, variance, temporal fusion, denoising, TAA,
+        super-resolution, and optional learned resolving.
+\end{enumerate}
+A renderer can be compute-first without pretending these layers are the
+same. In this paper, ``compute-first Vulkan path'' means a compute-first
+implementation of Vulkan's visual acquisition/rendering contract: visibility,
+G-buffer evidence, sparse radiance, texture/material evidence, and image-space
+outputs. It does not mean Vulkan becomes the contract for rigid-body dynamics,
+contact, IMU, LiDAR, radar, or all sensor semantics. vkGSplat's core claim is
+that the reconstruction layer, and much of the structured visual acquisition
+layer, can run on tensor-rich compute hardware. It is not that a Gaussian
+reconstructor replaces physical simulation or calibrated sensor modeling.
 
 \subsection{RT cores, tensor cores, and the new split}
 
@@ -506,10 +764,12 @@ scaling behavior~\cite{kaplan2020,lu2026}.
 For real-time games, fixed-function acquisition remains valuable because
 the frame budget is tight. For SDG, the balance changes. The consumer is
 usually a downstream model, not a human staring at a 16-ms deadline, and
-the workload is priced in images per dollar or joule. vkGSplat therefore
-pushes the split to its logical endpoint: keep the Vulkan description,
-but implement both acquisition and reconstruction as tile-friendly
-compute.
+the workload is priced in images per dollar or joule. Hardware Vulkan remains a
+strong acquisition baseline, especially when RTX/L40-class GPUs are already in
+the loop. vkGSplat explores the other branch: keep the Vulkan description and
+seed-buffer contract, but implement acquisition and reconstruction as
+tile-friendly compute when AI-hardware co-location and programmability dominate
+the cost model.
 
 \subsection{The DLSS precedent: tensor compute is already where the
 rendering value lives}
@@ -527,6 +787,37 @@ Ray-traced global illumination follows the same pattern:
 single-sample-per-pixel or low-sample path tracing produces sparse
 radiance, then spatiotemporal filters and denoisers reconstruct the
 image~\cite{schied2017svgf,chaitanya2017interactive,nvidia-nrd,bitterli2020restir}.
+NVIDIA's DLSS Ray Reconstruction makes this boundary explicit: ray samples are
+still fired into the scene to acquire representative lighting, reflectivity,
+and shadowing, while an AI network replaces hand-tuned denoisers and generates
+higher-quality pixels between sampled rays~\cite{nvidia-dlss35rr}. In other
+words, the physical grounding comes from the low-sample path-traced acquisition;
+the neural stage reconstructs the missing samples. This is exactly the
+principle vkGSplat should adopt for Physical AI visual realism.
+
+The caveat is important. Low-sample path tracing plus AI denoising can preserve
+physical plausibility and much of the realism of path tracing, but it is not an
+unbiased physical measurement. The denoiser may suppress rare paths, invent
+smooth structure, or fail under distribution shift. For SDG and robotics, the
+right contract is therefore not ``AI makes it physical,'' but ``physical rays
+acquire sparse truth; reconstruction fills the gaps; uncertainty gates decide
+when more oracle samples or a reference sensor path are required.''
+
+The sample budget and the path-depth budget should also be separated. Reducing
+samples per pixel lowers Monte Carlo acquisition cost while preserving the same
+transport integral in expectation. Reducing the maximum number of bounces changes
+the physical model itself: indirect illumination, refraction chains, glossy
+interreflection, and caustics can disappear before reconstruction ever sees
+support for them. A vkGSplat acquisition pass should therefore prefer low
+samples per pixel, lower seed resolution, adaptive sampling, and Russian
+roulette over a hard shallow-bounce cutoff. Each seed should carry enough
+metadata for the reconstructor to know how much physics it has actually seen:
+\texttt{spp}, requested maximum depth, realized path-depth moments, Russian
+roulette survival statistics, radiance variance, and confidence. A Gaussian or
+neural resolver can amortize sparse long-path evidence over views and time, but
+when those statistics say that a region has never observed the relevant path
+class, the system should request more oracle samples instead of silently
+hallucinating realism.
 
 vkGSplat does not need to clone DLSS. DLSS is the precedent that proves
 the rendering value has already moved toward compute-side
@@ -602,6 +893,277 @@ reuse, and learned scene representations.
 % =====================================================================
 \section{Why SDG is the right workload}\label{sec:workload}
 % =====================================================================
+
+\subsection{Amortized world building before simulation}
+\label{sec:world-building-lifecycle}
+
+The most important difference between SDG and gaming is not just that SDG can
+tolerate higher per-image latency. It is that SDG can separate
+\emph{world-building time} from \emph{simulation and acquisition time}. A game
+renderer must satisfy the next display frame under a hard latency budget. A SDG
+pipeline can spend a large offline budget establishing the world before it runs
+many camera trajectories, robot rollouts, randomized episodes, or policy
+training batches.
+
+The canonical vkGSplat lifecycle is therefore:
+\[
+\text{build} \rightarrow \text{simulate} \rightarrow \text{update}
+\rightarrow \text{acquire} \rightarrow \text{reconstruct}.
+\]
+The operational slogan is: \emph{build once, simulate many, invalidate
+precisely, acquire sparsely, reconstruct densely}. World building creates an
+expensive reusable base; simulation advances the changing physical state; update
+applies transforms and marks invalid cache regions; acquisition resamples only
+changed or uncertain evidence; reconstruction fuses that evidence into images,
+labels, Gaussian state, radiance caches, and sensor outputs.
+
+\begin{figure}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  phase/.style={draw, rounded corners=2pt, very thick, align=center,
+    text width=2.85cm, minimum height=1.18cm, font=\small},
+  store/.style={draw, dashed, rounded corners=2pt, align=center,
+    text width=4.7cm, minimum height=1.05cm, font=\small, fill=plotgreen!8},
+  edge/.style={-{Latex[length=2mm]}, thick},
+  feedback/.style={-{Latex[length=2mm]}, thick, dashed},
+  note/.style={align=center, font=\scriptsize}
+]
+\node[phase, fill=plotblue!10] (build) at (0,0)
+  {\textbf{Build}\\static world $\mathcal{W}_0$\\geometry, materials, lights\\BVH, 3DGS, caches};
+\node[phase, fill=plotcyan!10] (simulate) at (3.55,0)
+  {\textbf{Simulate}\\dynamic state $\mathcal{D}_t$\\robots, contacts\\objects, lights};
+\node[phase, fill=plotyellow!15] (update) at (7.10,0)
+  {\textbf{Update}\\transforms, epochs\\dirty regions\\confidence decay};
+\node[phase, fill=plotred!10] (acquire) at (10.65,0)
+  {\textbf{Acquire}\\Vulkan, RT, sensors\\seed buffers\\sparse physical truth};
+\node[phase, fill=plotgreen!12] (reconstruct) at (14.20,0)
+  {\textbf{Reconstruct}\\Gaussian/radiance state\\denoise, TAA, SR\\frame interpolation};
+
+\node[store] (state) at (7.10,-1.95)
+  {\textbf{Persistent explicit state}\\
+   $\mathcal{W}_0$ static base, $\mathcal{D}_t$ dynamic overlay, $\mathcal{G}_t$ Gaussian state,\\
+   radiance caches, sensor history, variance, confidence, and validity epochs};
+\node[phase, fill=white] (oracle) at (1.8,-3.55)
+  {\textbf{Oracle refresh}\\extra rays, path depth\\sensor simulator\\physics/material checks};
+\node[phase, fill=white] (consumer) at (12.35,-3.55)
+  {\textbf{Consumers}\\images, labels\\sensor streams\\training rollouts};
+
+\draw[edge] (build) -- (simulate);
+\draw[edge] (simulate) -- (update);
+\draw[edge] (update) -- (acquire);
+\draw[edge] (acquire) -- (reconstruct);
+\draw[edge] (reconstruct) -- node[note, right] {fused evidence} (consumer);
+
+\draw[edge] (build.south) |- (state.west);
+\draw[edge] (update.south) -- (state.north);
+\draw[edge] (state.east) -| node[note, pos=0.78, right] {queries} (acquire.south);
+\draw[edge] (reconstruct.south) |- (state.east);
+\draw[edge] (consumer.west) -- node[note, above] {policy or randomization} (oracle.east);
+
+\draw[feedback] (reconstruct.south west) to[bend left=14]
+  node[note, below] {uncertainty / epoch mismatch} (oracle.north east);
+\draw[feedback] (oracle.north west) to[bend left=18]
+  node[note, left] {large drift} (build.south west);
+\draw[feedback] (oracle.north) to[bend right=8]
+  node[note, above] {localized reacquisition} (acquire.south west);
+\draw[feedback] (consumer.north) to[bend right=16]
+  node[note, right] {next rollout} (simulate.south);
+\end{tikzpicture}%
+}
+\caption{Whole SDG lifecycle for vkGSplat. Expensive world building creates a
+reusable static base; simulation produces dynamic overlays; update/invalidation
+marks what changed; acquisition collects sparse physical evidence through
+hardware Vulkan, RT/path tracing, or sensor models; reconstruction turns that
+evidence into dense images, labels, sensor streams, Gaussian state, and radiance
+caches. Uncertainty and validity epochs decide whether to reuse state, locally
+reacquire evidence, or return to the oracle or rebuild stage.}
+\label{fig:sdg-lifecycle}
+\end{figure}
+
+We should therefore model a generated world as an amortized static base plus
+dynamic overlays:
+\begin{equation}
+  S_t = \mathcal{W}_0 \oplus \mathcal{D}_t,
+  \label{eq:world-plus-dynamics}
+\end{equation}
+where $\mathcal{W}_0$ contains static geometry, materials, textures, calibrated
+lighting priors, BVHs, mesh or Gaussian maps, precomputed visibility, and
+high-quality radiance or light-transport caches. $\mathcal{D}_t$ contains the
+state that changes during simulation: robot joints, contacts, movable objects,
+deformables, particles, dynamic lights, animated materials, and environment
+edits. Acquisition then measures
+\begin{equation}
+  A_{s,t} = Q_s(\mathcal{W}_0 \oplus \mathcal{D}_t, C_s, \eta_s),
+  \label{eq:world-lifecycle-acquisition}
+\end{equation}
+and reconstruction updates explicit state as in
+Eq.~\ref{eq:gs-reconstruction-update}. The key is that $\mathcal{W}_0$ can be
+expensive, because it is reused across many $t$, sensors, camera paths,
+randomized object placements, and downstream training jobs.
+
+This changes the role of path tracing and Gaussian state. In the
+world-building phase, vkGSplat can afford high-spp, high-bounce reference
+passes, inverse-rendered material estimation, dense static BVHs, static 3DGS
+capture, radiance-cache warmup, and sensor-calibration validation. In the
+simulation phase, it should not repeat that work blindly. It should acquire the
+delta caused by $\mathcal{D}_t$, reuse the static evidence where valid, and ask
+the oracle for additional samples only in regions whose visibility, lighting,
+material, or sensor state has changed.
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\caption{SDG lifecycle. Unlike games, SDG can amortize expensive
+world-building over many later simulation and acquisition episodes.}
+\label{tab:sdg-lifecycle}
+\begin{tabular}{p{0.18\textwidth}p{0.22\textwidth}p{0.27\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{Phase} & \textbf{Budget} & \textbf{Products} & \textbf{Main risk} \\
+\midrule
+World building & Seconds to hours per world & Static geometry, materials, textures, BVH/TLAS base, light priors, Gaussian maps, high-bounce radiance or transport caches & Baking final RGB that becomes invalid under later dynamics \\
+Simulation & Step-level physics budget & Robot state, contacts, movable objects, deformables, dynamic lights, material edits, semantic labels & Treating dynamic changes as only visual changes rather than physical state changes \\
+Update / invalidation & Per step or event-driven & Dynamic transforms, dirty camera/shadow/radiance masks, cache epoch updates, confidence decay & Missing a dependency and reusing stale evidence \\
+Acquisition & Per frame or adaptive burst & Seed buffers: color, depth, normals, primitive/material IDs, motion, sparse radiance, variance, path-depth statistics & Under-sampling changed visibility or changed lighting \\
+Reconstruction & Batched CUDA/PyTorch budget & Gaussian/radiance cache update, denoising, TAA, SR, frame interpolation, neural residuals & Reusing stale static evidence after invalidation events \\
+Oracle refresh & Adaptive, uncertainty-triggered & Extra ray/path samples, sensor-simulator calls, high-fidelity physics or material evaluation & Failing to refresh rare but task-critical events \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Dynamic lighting is the caveat that makes this lifecycle precise. If the static
+world stores only final RGB radiance, it is tied to the lights, materials, and
+visibility that produced it. Camera motion and static occlusion can be handled
+by depth, primitive IDs, motion, and disocclusion gates, but changing an emitter
+or material changes the radiometric problem itself. The correct static product
+is therefore not always a baked color image. It may need to be a relightable
+state: albedo and BRDF parameters, normals, visibility, per-light or
+per-environment-map transport bases, spherical-harmonic incident-light
+coefficients, path-depth moments, or separate direct and indirect radiance
+subslots. The minimum rule is that every radiance cache entry should carry
+validity epochs:
+\[
+  e = (e_{\mathrm{geom}}, e_{\mathrm{mat}}, e_{\mathrm{light}}, e_{\mathrm{vis}}),
+\]
+and a reconstruction query is high-confidence only when those epochs match the
+current dynamic state or when a learned residual has been validated for that
+kind of change.
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\caption{Validity of static world-building products under dynamic changes.}
+\label{tab:dynamic-validity}
+\begin{tabular}{p{0.18\textwidth}p{0.27\textwidth}p{0.43\textwidth}}
+\toprule
+\textbf{Change} & \textbf{What remains reusable} & \textbf{Required vkGSplat response} \\
+\midrule
+Camera or robot motion & Static geometry, material, BVH, Gaussian map, static radiance if lighting is unchanged & Reproject using depth, motion, primitive IDs, and visibility gates \\
+Dynamic rigid object & Static background state; object-local submap in local coordinates & Update TLAS/object transform, acquire new occlusion and shadow evidence, gate stale background behind object masks \\
+Deformable, fluid, particles & Static environment only & Treat as dynamic acquisition; use oracle samples or a specialized simulator/sensor model \\
+Dynamic occluder & Material and static lighting priors may remain valid & Refresh direct visibility, shadow visibility, and disoccluded regions; do not trust hidden Gaussian radiance blindly \\
+Moving or changing light & Geometry, albedo, BRDF, normals, and transport basis may remain valid; baked RGB does not & Invalidate light epoch, use per-light/SH transport if available, otherwise retrace sparse radiance and update cache \\
+Material or texture edit & Geometry, visibility, and light state may remain valid & Invalidate material epoch, recompute BRDF-dependent direct and indirect radiance \\
+Emissive object change & Geometry may remain valid, but both light and material epochs change & Treat as dynamic light plus material edit; refresh nearby indirect radiance and shadows \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+This is where 3DGS should be used carefully. A pure color-only Gaussian scene is
+an excellent static visual cache, but it is not a physical lighting model. A
+Physical-AI-grade vkGSplat state should move toward \emph{relightable Gaussians}:
+geometry, covariance, normal, albedo/material, visibility confidence, motion,
+and radiance decomposed into static, direct-light, indirect-light, and learned
+residual components. That does not make GSplat a replacement for path tracing or
+sensor simulation. It makes GSplat the amortized memory that decides which
+parts of the world can be reused and which parts require renewed acquisition.
+
+\subsection{Dynamic changes require invalidation, not full reconstruction}
+\label{sec:dynamic-invalidation}
+
+Dynamic objects, shadow changes, occlusion changes, and moving lights should not
+force vkGSplat to reconstruct the entire world. They should force a
+\emph{dependency-aware partial refresh}. The static world state answers what
+exists, where it is, and what its material parameters are. Dynamic acquisition
+answers what is visible and how it is illuminated under the current camera,
+light, and object state. Confusing these two questions is the failure mode that
+turns a useful 3DGS cache into a stale RGB hallucination.
+
+Each Gaussian or radiance-cache entry should therefore carry dependency metadata
+in addition to color and covariance:
+\[
+g_i =
+(\mu_i,\Sigma_i,n_i,\rho_i,m_i,L_i,\sigma_i^2,c_i,
+ \mathcal{O}_i,\mathcal{L}_i,e_i),
+\]
+where $\rho_i$ is albedo or material state, $m_i$ is motion state, $L_i$
+contains direct, indirect, and residual radiance subslots, $\sigma_i^2$ and
+$c_i$ store variance and confidence, $\mathcal{O}_i$ is the set of object or
+primitive IDs that can occlude or move the entry, $\mathcal{L}_i$ is the set of
+lights or environment components that materially affect it, and
+$e_i=(e_{\mathrm{geom}},e_{\mathrm{mat}},e_{\mathrm{light}},e_{\mathrm{vis}})$
+stores validity epochs. A camera query, shadow query, or radiance query is
+trusted only if its dependency epochs match the current scene state and its
+confidence remains above the task threshold.
+
+At simulation step $t$, the physics and scene systems emit change events:
+\[
+\Delta_t =
+\{\Delta_{\mathrm{pose}}, \Delta_{\mathrm{geom}}, \Delta_{\mathrm{mat}},
+  \Delta_{\mathrm{light}}, \Delta_{\mathrm{camera}}\}.
+\]
+vkGSplat maps these events to dirty sets:
+\begin{align}
+  \mathcal{D}^{cam}_t &= \mathrm{Project}(\Delta_{\mathrm{pose}}
+      \cup \Delta_{\mathrm{geom}}, C_t),\\
+  \mathcal{D}^{shadow}_t &= \mathrm{ProjectLight}(\Delta_{\mathrm{pose}}
+      \cup \Delta_{\mathrm{geom}}, \{L_t\}),\\
+  \mathcal{D}^{rad}_t &= \mathrm{Influence}(\Delta_{\mathrm{light}}
+      \cup \Delta_{\mathrm{mat}} \cup \mathcal{D}^{shadow}_t).
+\end{align}
+Only these regions need new evidence. A moved object updates its transform, TLAS
+instance, object-local Gaussian transform, and camera/depth occlusion mask. The
+background it newly reveals becomes low-confidence until reacquired. A moved
+occluder refreshes the light-visibility field and nearby shadow boundaries. A
+changed light invalidates direct and indirect radiance subslots for the surfaces
+inside its influence region, but leaves geometry, normals, albedo, and much of
+the BVH intact. A material edit invalidates BRDF-dependent radiance while
+leaving visibility and geometry reusable.
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\caption{Cache protocol for dynamic scene changes. The default action is
+partial invalidation and sparse reacquisition, not whole-world rebuild.}
+\label{tab:cache-invalidation-protocol}
+\begin{tabular}{p{0.16\textwidth}p{0.26\textwidth}p{0.22\textwidth}p{0.24\textwidth}}
+\toprule
+\textbf{Event} & \textbf{Invalidate} & \textbf{Reuse} & \textbf{Refresh kernel or oracle} \\
+\midrule
+Camera motion & screen projection, disoccluded pixels, history confidence & static geometry, material, light epochs & TAA reprojection, depth/ID rejection, sparse fill for holes \\
+Rigid object motion & object TLAS transform, camera occlusion, object shadow footprint & object-local shape/material Gaussians & transform Gaussians, update TLAS, trace camera/shadow seeds in dirty tiles \\
+Dynamic occluder & light visibility and shadow edges & surface material, static indirect priors outside influence & shadow-map/ray refresh, confidence decay behind moving occluder \\
+Light pose/intensity/color change & direct-light subslots, affected indirect radiance, light epoch & geometry, normals, albedo, BVH, visibility where unchanged & per-light relighting if transport exists; otherwise sparse path tracing \\
+Material/texture edit & material epoch, BRDF-dependent direct and indirect radiance & geometry, object pose, camera visibility & recompute shading and retrace affected indirect paths \\
+Topology/deformation & local geometry epoch, covariance, normals, visibility & unrelated static world regions & local Gaussian rebuild or simulator oracle samples \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+This protocol naturally produces an online update loop:
+\begin{enumerate}
+  \item advance physics and scene state, producing $\Delta_t$;
+  \item update dynamic transforms and local Gaussian frames;
+  \item construct camera, shadow, and radiance dirty masks;
+  \item decay confidence for invalidated Gaussian/radiance entries;
+  \item acquire sparse samples only in dirty masks or high-variance regions;
+  \item update Gaussian geometry, visibility, and radiance subslots;
+  \item reconstruct the final sensor output with uncertainty gates.
+\end{enumerate}
+The expensive static world is rebuilt only when the geometry or material change
+is so large that local updates no longer cover the error. This is the
+Physical-AI version of temporal rendering: most frames are not new worlds, but
+new measurements of a partially changed world.
 
 \subsection{Throughput-bound, latency-tolerant}
 
@@ -720,6 +1282,132 @@ the renderer can run there, the marginal cost of the SDG run is the
 opportunity cost of pre-existing capacity rather than the capex of a
 new fleet.
 
+\subsection{Economic compatibility with AI data centers}
+\label{sec:economic-case}
+
+The strongest economic case for vkGSplat is not merely that an H100 has high
+FLOPS. It is that the AI data center is the platform on which organizations are
+already spending, staffing, monitoring, and optimizing. Large AI operators now
+commit tens of billions of dollars per year to AI-capable infrastructure:
+Microsoft stated that it was on track to invest approximately \$80B in FY2025 to
+build AI-enabled datacenters; Alphabet expected approximately \$75B in 2025
+capital expenditures; and Meta's late-2025 outlook put capital expenditures at
+\$70--72B, with infrastructure capacity identified as the central requirement
+for its AI opportunities~\cite{microsoft-ai-datacenter-2025,alphabet-q4-2024-capex,meta-q3-2025-capex}.
+Amazon's 2024 shareholder letter makes the same structural point from another
+angle: AI demand requires datacenters, chips, and hardware to be bought upfront,
+and the firm is investing in custom AI silicon such as
+Trainium~\cite{amazon-shareholder-letter-2024}.
+Omdia's Data Center World 2026 outlook adds a second, more physical constraint:
+AI data centers are being reorganized around rack-scale systems, 800VDC power
+distribution, battery energy storage, self-generation, liquid cooling, and
+MW-class cooling distribution units~\cite{omdia-dcw-oas-2026}. This matters for
+vkGSplat because the cost of a separate SDG graphics island is no longer only
+the purchase price of GPUs. It is also power architecture, cooling qualification,
+space, operational tooling, and the opportunity cost of not using the
+AI-accelerator racks whose electrical and thermal infrastructure is already
+being designed.
+
+This is a compatibility argument, not a claim that CUDA software rendering must
+beat a mature RTX stack at every graphics microbenchmark. NVIDIA's current SDG
+approach is coherent: use RTX hardware for acquisition, Omniverse/Isaac for
+simulation and scene tooling, OVX for graphics-heavy digital-twin and
+simulation workloads, DGX/DGX Cloud for AI-factory training and inference, and
+AI reconstruction or world models where they fit~\cite{nvidia-ovx,nvidia-dgx-cloud}.
+vkGSplat targets the complementary economic case. If the organization is
+already committing its capital, datacenter power, procurement, cluster
+schedulers, storage paths, observability, and software qualification around
+AIDCs, then creating a separate graphics island can be more disruptive than
+accepting a less specialized but colocated compute implementation.
+
+This changes the SDG question. A graphics-specific SDG stack asks an
+organization to buy, operate, and schedule a second production substrate:
+graphics GPUs, graphics drivers, graphics observability, graphics queue
+management, renderer-specific deployment workflows, and a data path that moves
+rendered examples back into AI training storage. That may be correct for
+high-end visual effects or game-content pipelines, where graphics hardware is
+the primary factory. It is much harder to justify inside a robotics or foundation
+model organization whose dominant capital plan is already AI compute. In such
+an organization, the expensive thing is not only the GPU; it is disrupting the
+AIDC buildout with another procurement, deployment, and operations stack.
+
+The economic tension is therefore not ``NVIDIA versus non-NVIDIA.'' It is
+whether the SDG factory should be a heterogeneous two-cluster ecosystem or a
+unified software-defined workload on the AI data center. In the heterogeneous
+model, an OVX/RTX/Omniverse cluster produces simulated physical evidence and a
+DGX-class AI cluster consumes it. In the unified model, the Vulkan-compatible
+acquisition contract, seed rendering, reconstruction, sensor modeling, world
+models, and training all share the same scheduler, accelerator pool, tensor
+runtime, and storage locality. vkGSplat is the second model: it tries to make
+graphics and physical-data acquisition programmable enough that the massive
+compute resources already installed for AI can absorb SDG without a separate
+graphics-specialized island.
+
+The compute-first Vulkan path reframes SDG as an AI data-center application.
+The workload becomes a batch or streaming job with familiar properties:
+containerized kernels, CUDA/PyTorch tensors, object-store input and output,
+standard cluster scheduling, standard quota and billing, model-side telemetry,
+and the same accelerator fleet used for training, inference, and world-model
+rollouts. This is economically important even if a graphics accelerator wins
+some individual visibility tests. A specialized renderer can lose at the system
+level if it lowers per-ray cost but adds a separate fleet, lower utilization,
+extra data movement, separate software qualification, and a procurement cycle
+that cannot track AI-infrastructure scale. The success criterion is therefore
+not ``out-render RTX.'' It is ``make SDG fit the AIDC operating model while
+remaining good enough on physical fidelity, throughput, labels, and cost.''
+
+\begin{table}[t]
+\centering
+\small
+\caption{Economic interpretation of the vkGSplat strategy. The claim is not
+that fixed-function graphics is obsolete or that RTX SDG is the wrong baseline;
+it is that SDG becomes easier to scale when it does not disrupt the AI
+data-center buildout.}
+\label{tab:economic-case}
+\begin{tabular}{p{0.29\textwidth}p{0.30\textwidth}p{0.31\textwidth}}
+\toprule
+\textbf{Decision axis} & \textbf{Heterogeneous OVX/graphics + DGX AI clusters} & \textbf{Unified AI-data-center SDG workload} \\
+\midrule
+Capital plan & Dedicated graphics procurement and refresh cycle & Rides existing AI accelerator capex and depreciation schedule \\
+Utilization & Must keep a rendering fleet busy enough to justify ownership & Can fill training gaps, off-peak windows, and batched data-generation queues \\
+Software stack & Renderer-specific deployment, driver, profiling, and observability path & CUDA/PyTorch containers, standard cluster telemetry, common job scheduler \\
+Data movement & Simulation cluster emits data that must be moved to AI training storage & Acquisition, reconstruction, world models, and training can share device or nearby storage paths \\
+Optimization target & Per-frame or per-ray graphics performance & Physical evidence, labels, sensor streams, and task accuracy per dollar or joule \\
+Organizational fit & Treated as a specialized simulation/graphics service adjacent to the AI factory & Treated as another AI workload beside training, inference, evaluation, and data processing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\caption{External AIDC pressures and their architectural interpretation for
+vkGSplat. The Omdia figures are used as market evidence, not as hard physical
+laws; the design consequence is that SDG should minimize disruption to the
+AI-data-center power, cooling, and scheduling envelope.}
+\label{tab:omdia-aidc-pressures}
+\begin{tabular}{p{0.30\textwidth}p{0.29\textwidth}p{0.31\textwidth}}
+\toprule
+\textbf{AIDC pressure} & \textbf{Omdia 2026 signal} & \textbf{vkGSplat implication} \\
+\midrule
+IT and AIDC spending scale & \$6.07T total IT spending in 2026; data-center investment scenario approaching \$1.9T by 2030 & SDG should be packaged as an ordinary AI-data-center workload, not a bespoke rendering island \\
+Budget growth and adoption pressure & 72.9\% of organizations expect IT-budget increases in 2026; AI usage and model demand remain strong & Synthetic data generation must share the same scheduling, quota, telemetry, and utilization logic as training and inference \\
+Power and cooling become first-order & Rack-scale AI systems, 800VDC, BESS, self-generation, and liquid cooling move into the data-center roadmap & Adding graphics-specific hardware has physical-infrastructure cost, not just silicon cost; colocated compute paths become strategically valuable \\
+Physical AI token/data demand & Omdia positions Physical AI as a later wave that may demand even more tokens than current generative and agentic workloads & SDG must be amortized, explicit-state, and reconstruction-heavy; it cannot rely on full-fidelity acquisition for every sample \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This argument also explains why vkGSplat keeps Vulkan as the front-end contract.
+The goal is not to discard graphics semantics; it is to make those semantics
+deployable where the economic gravity already sits. A Vulkan-compatible
+acquisition contract lets existing assets and rendering abstractions survive,
+while the backend can be lowered to CUDA kernels, tensorized reconstruction,
+or eventually other AI-accelerator runtimes. If a site has abundant RTX or L40
+hardware, hardware Vulkan remains the natural acquisition backend. If the site
+has a large H100/B200/TPU/Trainium-style fleet and a hard time creating a new
+graphics island, vkGSplat makes SDG a software workload on the AI platform.
+
 A back-of-envelope energy budget reinforces the argument. At a 50-ms
 target image budget on an 80\% utilized H100 (700~W TDP), the
 rendering energy cost per image is roughly $0.3$~J. At
@@ -727,11 +1415,26 @@ $10^7$ images, that is $\sim 0.8$ kWh of rendering work --- a
 rounding error against the multi-megawatt-hour cost of training the
 downstream model.
 
+The same calculation should not be read as a promise that software acquisition
+is always more energy efficient than fixed-function graphics. It is a system
+placement argument. If the site already has a liquid-cooled, power-qualified AI
+cluster with idle or batch-fill capacity, the incremental SDG job may be
+economically preferable even when each visibility query is less specialized. If
+the site already has an RTX/L40/Omniverse production substrate, hardware
+graphics remains the correct baseline. vkGSplat is valuable precisely because it
+allows both paths to share a Vulkan seed-buffer contract and a downstream
+Gaussian/PyTorch reconstruction stack.
+
 % =====================================================================
 \section{System design}\label{sec:design}
 % =====================================================================
 
-vkGSplat is structured as three layers (Fig.~\ref{fig:arch}):
+vkGSplat's software-CUDA branch is structured as three layers
+(Fig.~\ref{fig:arch}). In the more general acquisition-neutral architecture, a
+hardware Vulkan renderer is a sibling branch: it may run the normal graphics
+pipeline and export the same seed-buffer ABI to the PyTorch/vkGSplat
+reconstruction stack. The figure therefore describes the distinctive vkGSplat
+implementation path, not the only valid acquisition path.
 
 \begin{figure}[t]
 \centering
@@ -804,8 +1507,9 @@ backend-agnostic compute IR (LLVM\,/\,MLIR), which is dispatched to
 CUDA, Triton\,/\,SYCL, or AI-accelerator-native backends. The
 rendering kernels --- 3DGS rasterizer, software tile rasterizer,
 BVH ray traversal, denoising --- run as compute on tensor- and
-SIMT-rich silicon. The fixed-function graphics path on the GPU is
-not used.}
+SIMT-rich silicon. The fixed-function graphics path is bypassed in this
+software backend, while a hardware Vulkan acquisition branch can still emit the
+same seed-buffer contract.}
 \label{fig:arch}
 \end{figure}
 
@@ -839,12 +1543,14 @@ not used.}
 
 The concrete software stack is now deliberately organized around
 CUDA-resident \emph{seed buffers}.  Existing Vulkan programs, beginning
-with Wicked Engine workloads, remain the application input.  vkGSplat
-captures their command-buffer, descriptor, SPIR-V, camera, and geometry
-state, then routes draw and ray-dispatch work into a software CUDA
-renderer rather than a fixed-function graphics queue.  The output of
-that software renderer is not merely a display image: it is a compact
-G-buffer-like seed containing color, depth, primitive identity,
+with Wicked Engine workloads, remain the application input.  A generic
+vkGSplat-compatible pipeline may obtain those seed buffers from a hardware Vulkan
+renderer through interop or capture; the distinctive vkGSplat backend captures
+the command-buffer, descriptor, SPIR-V, camera, and geometry state, then routes
+draw and ray-dispatch work into a software CUDA renderer rather than a
+fixed-function graphics queue.  The output of either renderer is not merely a
+display image: it is a compact G-buffer-like seed containing color, depth,
+primitive identity,
 barycentrics or local coordinates, motion-reconstruction inputs, and
 optional sample statistics.  Those buffers remain on the CUDA device and
 become the direct input to downstream CUDA kernels for screen-space
@@ -887,6 +1593,109 @@ production SDG path should avoid host readback between these stages.
 The same buffer ABI is also what CPU and Metal backends must emulate for
 correctness testing.
 
+\subsection{PyTorch as orchestration hub and world-model interface}
+\label{sec:pytorch-world-hub}
+
+The practical control plane should be PyTorch, while the performance-critical
+inner loops remain CUDA, Vulkan-facing command lowering, and explicit
+vkGSplat kernels. This is not a proposal to express rasterization, BVH
+traversal, or Gaussian tile compositing as ordinary eager tensor algebra. Many
+of those kernels need scatter, gather, atomics, prefix sums, sorting, queues,
+and visibility-dependent branches. PyTorch is instead the hub that owns
+experiment scheduling, tensor lifetimes, autograd where useful, distributed
+training, data loading, and model inference. CUDA extensions, nvdiffrast-style
+operators, Warp-style simulation kernels, and external-memory Vulkan interop
+then exchange CUDA-resident tensors without a host copy
+\cite{paszke2019pytorch,nvidia-warp}.
+
+This also gives a clean place to connect physical simulation, physics-based
+rendering, sensor modeling, vkGSplat reconstruction, and learned world models.
+The physics engine advances state; the renderer and sensor models acquire
+sparse but physically grounded evidence; vkGSplat fuses that evidence into a
+persistent geometric/radiance state; optional neural modules denoise,
+upscale, interpolate, or predict futures. PyTorch coordinates the graph and
+training losses, but the authority of each value still comes from its source:
+calibrated sensors and path tracing for measurements, simulation for dynamics,
+Gaussians for amortized reconstruction, and world models for learned priors or
+counterfactual proposals.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=0.68cm and 0.72cm,
+    every node/.style={font=\footnotesize},
+    box/.style={draw, rounded corners=2pt, align=center, minimum width=2.65cm, minimum height=0.68cm},
+    wide/.style={draw, rounded corners=2pt, align=center, minimum width=3.35cm, minimum height=0.68cm},
+    arrow/.style={-Latex, thick}
+]
+\node[box] (phys) {Physics engine\\state, contacts, materials};
+\node[box, right=of phys] (sensor) {Path tracer and sensors\\sparse physical evidence};
+\node[wide, right=of sensor] (torch) {PyTorch hub\\tensors, streams, training, policy};
+\node[box, right=of torch] (vk) {vkGSplat CUDA\\Gaussian state and resolver};
+\node[box, below=of torch] (wm) {World model\\prior, prediction, counterfactuals};
+\node[box, right=of vk] (out) {SDG outputs\\images, labels, trajectories};
+
+\draw[arrow] (phys) -- (sensor);
+\draw[arrow] (sensor) -- (torch);
+\draw[arrow] (torch) -- (vk);
+\draw[arrow] (vk) -- (out);
+\draw[arrow] (torch) -- (wm);
+\draw[arrow] (wm) -- (torch);
+\draw[arrow] (vk.south) |- (wm.east);
+\draw[arrow] (torch.north) to[bend right=18] node[above] {adaptive oracle requests} (sensor.north);
+\end{tikzpicture}
+\caption{PyTorch-centered orchestration keeps the programmable AI stack in
+charge of tensors, training, and scheduling, while vkGSplat remains the
+high-throughput CUDA reconstruction backend. World models are compatible with
+this design when they act as priors, rollout generators, or proposal
+mechanisms, and when uncertainty can trigger additional physical acquisition.}
+\label{fig:pytorch-world-hub}
+\end{figure*}
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\caption{Compatible roles in a PyTorch-centered vkGSplat stack.}
+\label{tab:pytorch-world-roles}
+\begin{tabular}{p{0.16\textwidth}p{0.36\textwidth}p{0.38\textwidth}}
+\toprule
+Component & Primary contract & Failure if misused \\
+\midrule
+Physics and sensors & Authoritative dynamics, contacts, calibration, and sparse physical measurements & Treating reconstruction artifacts as physical truth \\
+Path tracer & Low-sample but physically grounded radiance acquisition with adequate bounce depth & Cutting path depth until missing light transport is unrecoverable \\
+vkGSplat state & Persistent 3D/4D cache for geometry, radiance, variance, visibility, and motion & Hallucinating unsupported Gaussians without confidence gates \\
+World model & Learned prior, counterfactual rollout, scene proposal, and missing-context predictor & Replacing calibrated physics where safety-critical accuracy is required \\
+PyTorch hub & Tensor ownership, scheduling, training, neural inference, and interop & Forcing irregular visibility kernels into inefficient dense tensor form \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+World-model research is therefore compatible with vkGSplat, not a competitor
+to it. Classical world models learn compact latent dynamics for control
+\cite{ha2018}; Genie-style and Cosmos-style systems scale that idea toward
+interactive or generative environments for embodied agents
+\cite{bruce2024,deepmind2024genie2,nvidia2024cosmos}. The word ``replace''
+needs care here. A learned world model can replace many expensive simulator
+queries when the goal is exploration, data diversification, counterfactual
+rollout, photoreal transformation, or policy pretraining under a measured
+validation envelope. It should not be treated as replacing the calibrated
+physics engine, renderer, or sensor model where the required output is a
+measurement with known error bars. NVIDIA's own Cosmos positioning reflects
+this split: Cosmos Transfer is described as pairing with simulation frameworks
+such as CARLA and Isaac Sim, while Cosmos Predict generates controllable
+predictive worlds for downstream tasks~\cite{nvidia2024cosmos}. Genie-style
+models similarly emphasize playable action-controllable environments for agent
+research, not certified contact, optics, or sensor calibration.
+
+Those systems can propose trajectories, synthesize environment variation,
+provide learned temporal priors, or generate counterfactual rollouts for policy
+training. vkGSplat gives that learned stack an explicit 3D/4D state and a
+physically grounded acquisition interface. The most useful architecture is a
+closed loop: the world model predicts or proposes; vkGSplat projects and
+reconstructs explicit visual state; calibrated simulation and sensor/path-tracing
+oracles refresh regions where uncertainty, rare events, or task risk demand
+physical evidence.
+
 \subsection{Vulkan front-end}
 
 We target a deliberate \emph{subset}: graphics pipelines, compute
@@ -928,13 +1737,16 @@ become depth-only raster passes followed by a comparison kernel; for
 high-quality shadows we expect ray-traced shadows to be cheaper than
 classical shadow-map filtering at SDG quality targets.
 
-The seed path is intentionally low-resolution and low-sample. Each
-frame exports color, depth, primitive identity, and camera state into
+The seed path is intentionally low-resolution and low-sample, but not
+intentionally shallow. Each frame exports color, depth, primitive identity,
+camera state, sample count, path-depth statistics, and variance estimates into
 the temporal reconstruction contract. Adjacent frames then provide the
-screen-space motion map needed for history lookup; depth and primitive
-identity reject disocclusions and visibility changes; a small
-SVGF-style filter removes Monte Carlo noise before any optional learned
-reconstruction stage is considered.
+screen-space motion map needed for history lookup; depth and primitive identity
+reject disocclusions and visibility changes; a small SVGF-style filter removes
+Monte Carlo noise before any optional learned reconstruction stage is
+considered. The acquisition policy should first reduce samples per pixel and
+seed resolution, then spend extra samples adaptively where variance, missing
+path-depth support, or sensor confidence says the Gaussian history is weak.
 
 \subsection{Paused optional 3DGS fast path}\label{sec:v1}
 
@@ -1034,6 +1846,29 @@ benchmarks; the goal is to falsify the hypothesis ``models trained on
 vkGSplat data are competitive per dollar with models trained on
 Isaac~Sim or BlenderProc data,'' not to exhaustively characterize
 sim-to-real transfer.
+
+We also evaluate the world-building claim directly. For each scene we separate
+one-time build cost from per-frame acquisition cost:
+\[
+  C_{\mathrm{image}} =
+  \frac{C_{\mathrm{build}}}{N_{\mathrm{episodes}} N_{\mathrm{frames}}}
+  + C_{\mathrm{step}} + C_{\mathrm{acquire}} + C_{\mathrm{reconstruct}}.
+\]
+The experiment varies the reuse factor and the type of dynamic change. Static
+scenes should show strong amortization from high-bounce precomputation and
+Gaussian/radiance-cache warmup. Dynamic-occluder scenes should mostly increase
+visibility and shadow refresh cost. Dynamic-light and material-edit scenes are
+the hard case: color-only Gaussian caches should fail, while relightable
+Gaussian state or sparse oracle retracing should preserve quality. We report
+image metrics against high-spp references, but the pass/fail signal is
+staleness: light leaks, wrong shadows, wrong indirect color, wrong sensor
+statistics, and downstream task degradation after dynamic changes.
+The ablation should compare (i) full rebuild every frame, (ii) static cache with
+no invalidation, (iii) image-space invalidation only, and (iv) dependency-aware
+Gaussian/radiance-cache invalidation with targeted oracle refresh. The expected
+win condition is that option~(iv) approaches full-rebuild quality on dynamic
+lighting and occlusion cases while retaining most of the amortization benefit of
+the static cache.
 
 \begin{table}[t]
 \centering
@@ -1167,15 +2002,31 @@ even though the production SDG path is headless.
 \section{Conclusion}
 % =====================================================================
 
-We have argued that synthetic data generation for robotics is the wrong
-workload to be running on graphics-optimized silicon, and that Vulkan is
-the right API to keep. \textbf{vkGSplat} is our proposed bridge: a
-software Vulkan implementation whose backend is a compute-only renderer
-on AI accelerators, beginning with a 3D Gaussian Splatting fast path
-and growing toward a full software graphics stack. The position we
-defend is that graphics APIs and graphics hardware should be decoupled,
-and that the SDG market is the place where this decoupling pays off
-first.
+This paper began as a software-rendering argument, but the stronger conclusion
+is a world-modeling architecture for Physical AI. High-quality data generation
+should not be framed as a choice between calibrated simulation and learned
+world models. It should be framed as an acquisition--state--reconstruction loop:
+physical and sensor processes acquire sparse evidence; explicit 3D/4D state
+stores evidence, uncertainty, visibility, and motion; classical, Gaussian, and
+neural modules reconstruct or predict; and uncertainty decides when to return to
+the oracle. The central principle is that AI should reduce the cost of acquiring,
+storing, reconstructing, and querying physical truth, not silently replace it.
+The lifecycle matters as much as the loop: SDG can spend real time building a
+static world, then amortize that world through many dynamic simulation,
+acquisition, and reconstruction episodes. Static Gaussian or radiance caches are
+therefore powerful, but only when dynamic lights, material edits, moving
+occluders, and sensor effects are represented as explicit invalidation and
+refresh events.
+
+vkGSplat is the reference implementation of this principle. It keeps Vulkan as a
+portable visual-acquisition contract, treats direct hardware Vulkan acquisition
+as a valid source of evidence, and adds a CUDA software acquisition path for
+AI-compute co-location, custom evidence, and accelerator portability. If the
+implementation reaches its throughput, energy, and downstream accuracy targets,
+it will support both the software claim --- that graphics APIs can be decoupled
+from graphics hardware when the cost model demands it --- and the broader
+Physical AI claim: scalable world modeling should be backend-neutral at
+acquisition, compute-first at reconstruction, explicit-state, and oracle-aware.
 
 \appendices
 \section{Modernized Amdahl allocation details}

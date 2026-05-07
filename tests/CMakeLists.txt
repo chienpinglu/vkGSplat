@@ -17,6 +17,7 @@ vkgsplat_add_test(test_public_headers)
 vkgsplat_add_test(test_raytrace_seed)
 vkgsplat_add_test(test_reprojection)
 vkgsplat_add_test(test_scene)
+vkgsplat_add_test(test_sensor_model)
 vkgsplat_add_test(test_spirv_translate)
 vkgsplat_add_test(test_tile_raster)
 vkgsplat_add_test(test_types)
@@ -60,4 +61,42 @@ if(VKGSPLAT_ENABLE_CUDA AND VKGSPLAT_ENABLE_3DGS)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     add_test(NAME test_cuda_tile_renderer COMMAND test_cuda_tile_renderer)
     set_tests_properties(test_cuda_tile_renderer PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_cuda_rasterizer_smoke test_cuda_rasterizer_smoke.cpp)
+    target_link_libraries(test_cuda_rasterizer_smoke PRIVATE vkgsplat CUDA::cudart)
+    set_target_properties(test_cuda_rasterizer_smoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_test(NAME test_cuda_rasterizer_smoke COMMAND test_cuda_rasterizer_smoke)
+    set_tests_properties(test_cuda_rasterizer_smoke PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+if(VKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS)
+    if(WIN32)
+        find_program(VKGSPLAT_POWERSHELL NAMES pwsh powershell)
+        if(NOT VKGSPLAT_POWERSHELL)
+            message(FATAL_ERROR "VKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS=ON on Windows requires pwsh or powershell")
+        endif()
+        set(VKGSPLAT_WICKED_NVIDIA_COMMAND
+            ${VKGSPLAT_POWERSHELL}
+            -NoProfile
+            -ExecutionPolicy
+            Bypass
+            -File
+            ${CMAKE_SOURCE_DIR}/scripts/run_wicked_nvidia_smoke.ps1
+            -AllowSkip
+        )
+    else()
+        set(VKGSPLAT_WICKED_NVIDIA_COMMAND
+            ${CMAKE_SOURCE_DIR}/scripts/run_wicked_nvidia_smoke.sh
+            --allow-skip
+        )
+    endif()
+    add_test(
+        NAME test_wicked_nvidia_vulkan_smoke
+        COMMAND ${VKGSPLAT_WICKED_NVIDIA_COMMAND}
+    )
+    set_tests_properties(test_wicked_nvidia_vulkan_smoke PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 900
+    )
 endif()

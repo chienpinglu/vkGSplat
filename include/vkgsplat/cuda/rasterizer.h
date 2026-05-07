@@ -58,6 +58,7 @@ struct RasterizerTunables {
     int   tile_size      = 16;     // pixels per tile edge
     float density_clamp  = 100.0f; // numerical safety for tiny scales
     int   max_radii_pixels = 256;  // skip pathologically large gaussians
+    int   max_splats_per_tile = 1024; // M0 fixed-capacity deterministic tile lists
     bool  use_anti_aliased_filter = true; // Mip-Splatting style filter
 };
 

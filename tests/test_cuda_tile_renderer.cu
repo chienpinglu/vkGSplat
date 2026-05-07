@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -22,6 +23,10 @@ namespace {
             return 1;                                                           \
         }                                                                       \
     } while (0)
+
+bool near(float a, float b, float eps = 1.0e-5f) {
+    return std::abs(a - b) <= eps;
+}
 
 } // namespace
 
@@ -79,6 +84,14 @@ int main() {
     cudaFree(d_indices);
     cudaFree(d_ranges);
     cudaFree(d_pixels);
+
+    const vkgsplat::float4 corner = pixels[0];
+    if (!near(corner.x, 0.0f) || !near(corner.y, 0.0f) ||
+        !near(corner.z, 0.0f) || !near(corner.w, 0.0f)) {
+        std::fprintf(stderr, "CUDA tile renderer did not clear background: corner=(%.4f %.4f %.4f %.4f)\n",
+                     corner.x, corner.y, corner.z, corner.w);
+        return 1;
+    }
 
     const vkgsplat::float4 center = pixels[8 * launch.width + 8];
     if (!(center.x > 0.90f && center.z > 0.04f && center.x > center.z)) {

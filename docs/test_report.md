@@ -121,6 +121,7 @@ magick -delay 8 -loop 0 docs/images/wicked_cornell_seed_clip_metal_*.ppm -filter
 | `test_raytrace_seed` | Runs the M6 Vulkan-ray-tracing-shaped CPU seed fixture. It traces two noisy 1-spp triangle-scene frames, verifies hit/miss behavior and RT API-shape flags, derives a camera motion map from NDC depth and camera matrices, reprojects stable hit history, rejects miss history, and feeds the result into the denoiser. | In-memory only. |
 | `test_reprojection` | Runs the two-frame temporal reprojection contract. It derives a current-to-previous screen-space motion map from camera matrices and current NDC depth, reprojects previous-frame color, and checks history rejection for disocclusion, primitive-ID mismatch, and depth mismatch. | In-memory only. |
 | `test_scene` | Smoke-tests the `Scene` container: empty state, resize, size, and name storage. | None |
+| `test_sensor_model` | Checks calibrated sensor measurement helpers used by the Physical AI acquisition/reconstruction split. | None |
 | `test_spirv_translate` | Exercises the SPIR-V parser/analyzer and restricted C/CUDA translators. It covers entry points, storage buffers, descriptor decorations, `GlobalInvocationId`, ray query ops, and `RayGenerationKHR`/`OpTraceRayKHR` lowering. | None |
 | `test_tile_raster` | Checks tile-grid construction and deterministic half-open tile binning for splat bounds that are inside, clipped, crossing tiles, and outside. | None |
 | `test_types` | Guards core POD layout: `float3`, `float4`, `mat4`, and the Gaussian SH coefficient count. | None |
@@ -156,18 +157,18 @@ These tests are compiled only when the relevant SDK/backend is enabled. They ret
 | --- | --- | --- |
 | `test_vulkan_m7_offscreen` | Creates a Vulkan instance, finds a physical device with vkGSplat mesh-shader requirements, finds a graphics queue, and creates a logical device with mesh shader, buffer device address, and synchronization extensions. The offscreen draw target is still a gate, not a rendered image test. | None |
 | `test_cuda_tile_renderer` | With CUDA and 3DGS enabled, runs the CUDA tile renderer on a tiny projected-splat fixture, copies pixels back, and checks the center pixel is red-dominant after sorted blending. | In-memory only. |
+| `test_cuda_rasterizer_smoke` | With CUDA and 3DGS enabled, exercises the public CUDA renderer path: `make_renderer("cuda")`, scene upload, CUDA preprocess/projection, fixed-capacity deterministic device tile lists/ranges, tile blending, and `HOST_BUFFER` readback. | In-memory only. |
+| `test_cuda_gaussian_reconstruction` | With CUDA and 3DGS enabled, validates the tensorized reconstruction kernels for seed-buffer ingestion, device-side sample counts, tile bin/compact/resolve, gated weighted resolve, Gaussian state update, and feature projection. | In-memory only. |
 
 ## Latest Local Result
 
 The CPU suite passed locally:
 
 ```text
-Default build, VKGSPLAT_ENABLE_3DGS=OFF:
-100% tests passed, 0 tests failed out of 9
+Default Apple build, VKGSPLAT_ENABLE_3DGS=OFF, VKGSPLAT_ENABLE_METAL=ON:
+100% tests passed, 0 tests failed out of 11
 
-Metal build, VKGSPLAT_ENABLE_METAL=ON:
-100% tests passed, 0 tests failed out of 10
-
-Optional 3DGS build, VKGSPLAT_ENABLE_3DGS=ON:
-100% tests passed, 0 tests failed out of 15
+CUDA configure on this Mac:
+blocked before compile because CMake cannot find nvcc. Re-run the CUDA gates on
+an NVIDIA workstation with CUDA Toolkit 12.8+.
 ```

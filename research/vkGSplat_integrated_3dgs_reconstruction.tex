@@ -1197,6 +1197,62 @@ CUDA implementation should keep the minimal $K_s$ above, then measure which
 extra channels actually improve denoising, temporal stability, or frame
 interpolation.
 
+
+The current M0 CUDA code implements this ABI as a deliberately small tensor
+pipeline:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Stage & CUDA entry point & Tensor shape & Purpose \\
+\midrule
+Extract & \texttt{launch\_extract\_nvdiffrast\_sample\_tensors} & $BHW\rightarrow M_s$ & compact valid raster/interpolate hits \\
+Counted update & \texttt{launch\_accumulate\_...\_counted} & $M_s\rightarrow N$ & consume device-side sample count without host sync \\
+Project & \texttt{launch\_project\_gaussian\_state\_features} & $N\rightarrow HW$ & emit feature planes; optional \texttt{motion\_alpha} evaluates 4DGS-lite time \\
+Tile count & \texttt{launch\_build\_gaussian\_sample\_tile\_bins} & $M_s\rightarrow T$ & produce per-sample tile IDs and per-tile counts \\
+Tile compact & \texttt{launch\_compact\_gaussian\_sample\_tile\_bins} & $(M_s,T)\rightarrow M_s$ & scatter compact sample indices into tile-local spans \\
+Tile resolve & \texttt{launch\_resolve\_gaussian\_sample\_tiles} & $(T,M_s)\rightarrow HW$ & consume tile spans and emit radiance/depth/id feature planes \\
+Weighted resolve & \texttt{launch\_resolve\_...\_weighted} & $(T,M_s,r^2)\rightarrow HW$ & accumulate Gaussian footprint taps, then normalize radiance/depth/confidence \\
+Gated resolve & \texttt{launch\_resolve\_...\_weighted\_gated} & $(T,M_s,r^2,G)\rightarrow HW$ & reject taps by primitive/depth/normal/motion guide tensors before accumulation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The tile-list contract is intentionally compatible with both CUB-style scans
+and PyTorch experimentation. For a flattened tile grid of $T$ tiles, define
+$c_t$ as the value stored in \texttt{tile\_counts} for tile $t$. The exclusive
+offset vector $O\in \mathbb{Z}^{T+1}$ is
+\[
+  O_0=0,\qquad O_{t+1}=O_t+c_t .
+\]
+\texttt{launch\_compact\_gaussian\_sample\_tile\_bins} then writes sample
+indices into
+\[
+  \texttt{tile\_sample\_indices}[O_t, O_{t+1}) .
+\]
+This is the first reusable primitive for tensorized TAA/SR/frame-generation
+kernels: later projection and resolve kernels can launch block-per-tile work
+and touch only local sample or Gaussian members. The current direct
+\texttt{launch\_resolve\_gaussian\_sample\_tiles} kernel is a plumbing oracle:
+one compact sample maps to one output pixel. The companion
+\texttt{launch\_resolve\_gaussian\_sample\_tiles\_weighted} path is the first
+reconstruction-shaped CUDA kernel: for footprint radius $r$, it emits
+confidence-weighted Gaussian taps into radiance and depth accumulators using
+atomic adds, then normalizes a dense $HW$ tensor. Its initial $r=0$ mode should
+match the direct resolver exactly; $r>0$ is the first place to measure blur,
+ghosting, variance reduction, and atomics cost. The M1
+\texttt{launch\_resolve\_gaussian\_sample\_tiles\_weighted\_gated} variant adds
+dense guide tensors $G$: primitive IDs, depth/confidence, optional normals, and
+optional motion. A tap is rejected before accumulation when it crosses a
+primitive boundary, exceeds the depth epsilon, fails the normal dot threshold, or
+exceeds the motion residual threshold. Its counters are the first CUDA-side
+ghosting diagnostics: emitted taps versus primitive/depth/normal/motion
+rejections. Later variants should add visibility ordering and neural or analytic
+residual channels. The present binding leaves the exclusive scan as a tensor
+operation, e.g. \texttt{torch.cumsum} in experiments or CUB/Thrust in
+production, so the custom CUDA code stays focused on the irregular count,
+scatter, and tile-local resolve parts.
+
 The persistent Gaussian state should also be SoA tensors:
 
 \[
@@ -2171,6 +2227,37 @@ This is cheaper than duplicating the entire Gaussian state for TAA, SR, and
 frame generation. It also gives frame generation a clean source for
 $G_j(t_0)$ and $G_j(t_1)$ without keeping separate motion caches.
 
+\subsection{4DGS-Lite for TAA}
+
+The TAA path should use ideas from 4DGS, but the first CUDA prototype should
+not require a fully learned dynamic 4DGS model. The useful 4DGS idea is that
+history is a continuous-time Gaussian object, not only an image-space previous
+color. Represent the motion-critical part of each Gaussian as
+\[
+  G_j(t)=
+  \{\mu_j(t),\Sigma_j(t),\bar L_j(t),\alpha_j(t),\nu_j(t)\},
+\]
+where $\nu_j(t)$ is temporal confidence. The M1 implementation can start with
+constant-velocity motion,
+\[
+  \mu_j(t)=\mu_j(t_0)+v_j(t-t_0),
+  \qquad
+  \Sigma_j(t)=\Sigma_j(t_0)+\sigma^2_{v,j}(t-t_0)^2 I,
+\]
+so motion uncertainty widens the projected footprint rather than pretending the
+old sample is exact. The TAA resolve then evaluates and projects $G_j(t)$ at the
+current frame time and current jitter phase. This is the 4DGS counterpart of
+image-space reprojection: the previous observation is carried by a moving
+Gaussian state before it is sampled in screen space.
+
+Full learned 4DGS or deformation-basis methods are reserved for later stages.
+They become necessary only if the analytic state fails on nonrigid motion,
+rolling shutter, topology changes, or acceleration. The first pass/fail test is
+therefore: can the analytic 4DGS-lite state reduce shimmer and ghosting against
+image-space TAA while sharing the same tile lists used by SR and frame
+interpolation? If yes, 4DGS is the right abstraction; if no, learned dynamic
+4DGS features should be tested as an explicit ablation rather than assumed.
+
 \subsection{Default Prototype Parameters}
 
 The first demo should use explicit conservative defaults:
@@ -2788,6 +2875,55 @@ Implement only $C_j$ and $A_j^{taa}$. Use static camera-pan clips with jitter.
   \item TAA projection reuses the same CUDA tile/binning data intended for SR.
 \end{itemize}
 
+\subsection{M0R: Minimal CUDA Render Bridge}
+
+The current code should also keep a deliberately narrow CUDA render bridge in
+place, because reconstruction experiments need an end-to-end projected-splat
+path even before the full CUDA rasterizer is finished. This bridge is not the
+final renderer. It is an implementation scaffold with one important property:
+the device tile renderer consumes the same \texttt{GpuProjectedSplat},
+\texttt{GpuTileRange}, and sorted-index ABI that later TAA, SR, interpolation,
+and feature-projection kernels should reuse.
+
+The present M0R split is intentionally simple:
+
+\begin{itemize}
+  \item projection, covariance footprint, opacity, SH/color evaluation, and
+        per-Gaussian tile coverage now run in a CUDA preprocessor,
+  \item the renderer now builds deterministic device-side tile lists and
+        \texttt{GpuTileRange} records with a fixed per-tile capacity, avoiding
+        host readback in the M0 render path,
+  \item fixed-list overflow is counted on device and reported after stream
+        synchronization, so dense scenes expose capacity loss instead of
+        silently dropping splats,
+  \item this fixed-list kernel is intentionally a bridge: it proves the ABI and
+        deterministic range construction before the production count/scan/
+        scatter and depth-key sort path replaces it,
+  \item alpha compositing already runs through CUDA \texttt{TileBlend}, which
+        clears the output, clamps opacity, and stops once transmittance is
+        small.
+\end{itemize}
+
+This is acceptable only as a short bridge. The first pass/fail test is whether
+the CUDA tile blend matches the CPU 3DGS reference for tiny scenes after both
+are given identical projected splats and tile ranges. The second test replaces
+one host-owned stage at a time and checks that image error and tile statistics
+remain stable. The replacement order should be:
+
+\begin{enumerate}
+  \item replace the fixed-capacity tile-list kernel with device tile-count
+        emission, exclusive scan, and compact scatter,
+  \item add depth-key generation and either CUB radix sort or bounded tile-local
+        sort,
+  \item reuse the same tile ranges for TAA, SR, feature projection, and
+        frame-generation kernels instead of building renderer-only ranges.
+\end{enumerate}
+
+M0R fails if the renderer builds a private tile-list ABI that the
+reconstruction kernels cannot consume. It succeeds if render, TAA, SR, and
+frame interpolation all use the same projected-splat/range contract, even while
+some construction stages are still host oracles.
+
 \subsection{M2: Same State, 2x/4x SR}
 
 Add $A_j^{sr}$ but keep the same shared core $C_j$. The only scale-specific
@@ -2902,6 +3038,10 @@ CUDA launch API:
 class CudaGaussianReconstructionCache {
 public:
     void extract_samples_cuda(const SeedFrameDeviceView& seed);
+    void build_sample_tile_bins_cuda(const SampleTensorDeviceView& samples);
+    void compact_sample_tile_bins_cuda(const TileOffsetDeviceView& offsets);
+    void resolve_sample_tiles_weighted_cuda(const WeightedResolveParams& params);
+    void resolve_sample_tiles_weighted_gated_cuda(const GatedResolveParams& params);
     void update_visibility_cuda(const DepthIdDeviceView& current);
     void bin_gaussians_cuda();
     void assign_and_update_cuda();
@@ -3429,6 +3569,183 @@ then the old graphics paradigm still owns the bottleneck. The interesting
 outcome is not ideological; it is the measured boundary where one dominant
 paradigm's hardware surplus becomes another paradigm's accelerator.
 
+
+\section{Appendix: Physical AI Accuracy and Sensor Modeling}
+
+A vkGSplat renderer should not claim physical accuracy merely because it stores
+explicit 3D/4D Gaussian state. A Gaussian state is an excellent carrier for
+persistent measured evidence, uncertainty, visibility, motion, and radiance. It
+is not, by itself, a physics simulator or a calibrated sensor simulator. This
+matters for Physical AI, where synthetic data and closed-loop simulation are
+used for robotics, autonomous vehicles, and industrial agents. NVIDIA describes
+Cosmos as an open platform for Physical AI with world foundation models, and
+Isaac Sim as a robotics simulator for physically based virtual environments,
+robotics testing, and synthetic data generation \cite{nvidia2026cosmos,
+nvidia2026isaacsim}. Isaac Sim also separates rendering from physics-based
+sensors: those sensors run after rendering, access physics properties such as
+mass and velocity, and emit physics-engine measurements that may be augmented by
+post-process noise \cite{nvidia2026isaacphysicssensors}. vkGSplat should follow
+the same separation of authority.
+
+The most important design rule is that physical realism enters primarily during
+acquisition. In a real deployment, acquisition means calibrated cameras, LiDAR,
+radar, IMU, joint, contact, and timing systems. In simulation, acquisition means
+a physics engine plus calibrated raster/ray/path/sensor models. vkGSplat can
+cache, fuse, denoise, replay, and temporally reconstruct this evidence, but it
+cannot recover missing physics that was never acquired or simulated. Once a
+specular path, rolling-shutter timing error, contact impulse, LiDAR dropout, or
+radar multipath event is absent from the seed data, a Gaussian resolver can only
+hallucinate a plausible substitute.
+
+The correct claim is therefore:
+
+\begin{quote}
+vkGSplat can contribute Physical AI-grade sensor realism as a fast,
+uncertainty-aware reconstruction and sensor-cache layer, but the authoritative
+physical state must come from the acquisition phase: real calibrated sensors,
+physics simulation, calibrated ray/sensor equations, and validation against real
+or high-fidelity reference data.
+\end{quote}
+
+Let $S_t$ be the simulator state: rigid and articulated poses, velocities,
+contact state, materials, lights, and environment state. Let $R_t$ be sparse or
+expensive rendering evidence from rasterization, ray tracing, path tracing, or a
+reference sensor simulator. Let $\mathcal G_t$ be the persistent Gaussian state.
+A safe Physical AI formulation is
+
+\[
+  \mathcal G_t = U_\theta(\mathcal G_{t-1}, S_t, R_t, A_t),
+\]
+
+where $A_t$ contains raster or sensor seed buffers: depth, primitive identity,
+world position, normal, motion, material IDs, confidence, and variance. For each
+sensor $s$, vkGSplat predicts a measurement
+
+\[
+  \hat y_{s,t} = H_s(\mathcal G_t, S_t, C_s) + \epsilon_s,
+\]
+
+where $C_s$ is calibration and $\epsilon_s$ is a calibrated noise model. The
+important discipline is that $H_s$ is sensor-specific. There is no generic
+``render RGB and call it a sensor'' shortcut for Physical AI. RGB, depth, LiDAR,
+radar, event cameras, IMU, joint effort, and contact sensors have different
+measurement equations, failure modes, rates, and timing.
+
+\begin{center}
+\small
+\begin{tabular}{p{0.20\linewidth}p{0.34\linewidth}p{0.34\linewidth}}
+\toprule
+Layer & Owns & vkGSplat role \\
+\midrule
+Physics engine & dynamics, contact, mass, friction, joint state, IMU/contact/joint truth & consume state and timestamps; do not infer these from Gaussians \\
+Raster/ray/path oracle & visibility, occlusion, high-quality radiance, range hits, rare paths & provide sparse correction samples and confidence gates \\
+Persistent Gaussian state & measured geometry/radiance/features, variance, visibility, motion, material IDs & fast cache and reconstruction substrate \\
+Sensor model & calibration, optics, scan timing, noise, dropout, quantization, rolling shutter & project Gaussian/physics state into calibrated measurements \\
+Neural resolver & learned priors for image/video completion & optional; must be uncertainty-gated and validated \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This makes the framework physically useful without pretending that 3DGS is the
+physical oracle. The Gaussian state can store metric position, covariance,
+normal, opacity, radiance, BRDF/material features, semantic and primitive IDs,
+velocity, angular velocity or deformation parameters, timestamp, confidence,
+variance, visibility age, and sensor-specific residuals. CUDA kernels can then
+query this state at high rate. However, if confidence is low, if disocclusion is
+large, if material/path behavior is outside the Gaussian model, or if a safety
+critical sensor is being evaluated, the framework must fall back to the
+authoritative physics/ray/sensor path.
+
+\begin{center}
+\scriptsize
+\begin{tabular}{p{0.12\linewidth}p{0.34\linewidth}p{0.36\linewidth}p{0.10\linewidth}}
+\toprule
+Sensor & Required model & Gaussian contribution & Risk \\
+\midrule
+RGB camera & lens distortion, aperture/PSF, exposure, rolling shutter, motion blur, Bayer/ISP, shot/read/dark noise, tone map/compression & fast radiance and feature reconstruction, temporal history, uncertainty map & plausible but radiometrically wrong pixels \\
+Depth/stereo/ToF & baselines, occlusion, IR response, multipath, quantization, flying pixels, confidence & dense depth prior and disocclusion masks & wrong edges and reflective/transparent failures \\
+LiDAR & beam divergence, scan timing, range noise, incidence, intensity, dropout, multi-return, weather & approximate range/reflectance cache; fast local replay & missed thin objects and wrong multipath \\
+Radar & Doppler, antenna pattern, wave scattering, material response, multipath & learned or cached surrogate only & weak physical fit; needs ray/wave oracle \\
+Event camera & log-intensity derivative, threshold variation, refractory period, timestamp jitter & continuous-time radiance/motion state & false events under interpolation errors \\
+IMU/contact/joint & accelerations, angular velocity, forces, torques, contact impulses from physics & synchronization and cross-sensor consistency only & should not be generated from GS \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For CUDA implementation this implies a sensor-facing extension of the current
+M0 state. The base structure should remain SoA, but add optional pages:
+
+\[
+  G_i = (\mu_i, \Sigma_i, q_i, c_i, \alpha_i, f_i, m_i, v_i, \omega_i,
+         id_i, \tau_i, \nu_i, \sigma_i^2, r_{i,s}).
+\]
+
+Here $q_i$ is orientation, $c_i$ radiance or spectral color, $f_i$ learned or
+analytic features, $m_i$ material/sensor reflectance parameters, $v_i$ and
+$\omega_i$ motion, $\tau_i$ timestamp, $\nu_i$ confidence, $\sigma_i^2$
+variance, and $r_{i,s}$ optional residuals for sensor $s$. A camera projection
+kernel uses $\mu_i,\Sigma_i,c_i,v_i,\tau_i$ and calibration. A LiDAR kernel uses
+ray/beam parameters, opacity or density, surface normal, material reflectance,
+and range-confidence gates. A physics sensor kernel should normally not query
+$G_i$ except for synchronization or cross-sensor consistency; its measurement
+comes from $S_t$.
+
+The current implementation exposes this as a small host-side contract rather
+than a monolithic simulator. The \texttt{sensor\_model} module provides a
+\texttt{CameraSensorModel} for calibrated exposure, noise, quantization,
+vignetting, and rolling-shutter timing, plus a
+\texttt{SensorPreservationPolicy} gate that decides whether a reconstructed
+Gaussian observation is safe to reuse or whether the system must request the
+physics/ray/sensor oracle. This keeps the CUDA reconstruction path compatible
+with Physical AI while preserving the central rule: learned 3DGS state can carry
+measured realism, but it does not create missing physical evidence.
+
+The pass/fail bar should be statistical and task-level, not only image-quality
+metrics:
+
+\begin{enumerate}
+  \item \textbf{Camera/radiance:} compare against path-traced or real-calibrated
+        data using linear radiance error, PSNR/SSIM/LPIPS, temporal flicker,
+        depth/normal error, and exposure/ISP ablations.
+  \item \textbf{Depth/LiDAR:} measure range error by distance, incidence angle,
+        material, edge proximity, and weather; report dropout, multi-return, and
+        false-positive statistics.
+  \item \textbf{Perception transfer:} train or evaluate a detector/segmenter/
+        depth estimator on vkGSplat sensor output and compare against real-log
+        or high-fidelity simulator performance.
+  \item \textbf{Closed-loop control:} run a robot or vehicle policy using exact
+        simulated sensors, vkGSplat sensors, and vkGSplat plus oracle fallback;
+        compare success, collisions, interventions, and trajectory drift.
+  \item \textbf{Safety stress:} evaluate glass, mirrors, thin geometry, rain,
+        dust, low light, high speed, rolling shutter, disocclusions, and dynamic
+        occluders. These should be explicit failure tests.
+\end{enumerate}
+
+The experiment that decides whether vkGSplat belongs in a Physical AI stack is
+an ablation with equal compute and bandwidth budgets:
+
+\begin{center}
+\small
+\begin{tabular}{p{0.22\linewidth}p{0.32\linewidth}p{0.34\linewidth}}
+\toprule
+System & Expected strength & Deciding metric \\
+\midrule
+Exact physics/ray sensors & best physical accuracy, slowest & reference quality and safety baseline \\
+Image-space neural reconstruction & fast and visually plausible & domain gap and temporal/sensor failures \\
+Separate per-sensor GS caches & better sensor specialization & memory cost and cross-sensor consistency \\
+Shared vkGSplat state & shared geometry/motion/visibility evidence & accuracy per watt and task transfer \\
+Shared state plus oracle fallback & best safety profile & failure rate under stress scenes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+If the shared Gaussian state plus fallback matches the task-level behavior of
+exact sensors while saving substantial time or energy, vkGSplat is a strong
+Physical AI sensor substrate. If it only improves RGB appearance while harming
+range, timing, contact, or policy behavior, then it should remain a visual
+reconstruction tool rather than a Physical AI simulator.
+
+
 \begin{thebibliography}{99}
 
 \bibitem{kerbl2023gs}
@@ -3603,6 +3920,24 @@ Xuezhen Wang, Li Ma, Yulin Shen, Zeyu Wang, and Pedro V. Sander.
 \newblock RetimeGS: Continuous-Time Reconstruction of 4D Gaussian Splatting.
 \newblock CVPR, 2026.
 \newblock \url{https://william-wang2.github.io/RetimeGS/}
+
+\bibitem{nvidia2026cosmos}
+NVIDIA.
+\newblock NVIDIA Cosmos: Physical AI with World Foundation Models.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://www.nvidia.com/en-us/ai/cosmos/}
+
+\bibitem{nvidia2026isaacsim}
+NVIDIA Developer.
+\newblock NVIDIA Isaac Sim: Robotics Simulation and Synthetic Data Generation.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://developer.nvidia.com/isaac-sim}
+
+\bibitem{nvidia2026isaacphysicssensors}
+NVIDIA.
+\newblock Isaac Sim Documentation: Physics-Based Sensors.
+\newblock Accessed May 5, 2026.
+\newblock \url{https://docs.isaacsim.omniverse.nvidia.com/6.0.0/sensors/isaacsim_sensors_physics.html}
 
 \bibitem{nvidia2026dlss5}
 NVIDIA.

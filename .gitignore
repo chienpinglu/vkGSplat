@@ -84,4 +84,15 @@ papers/*.blg
 papers/*.log
 papers/*.out
 papers/*.toc
+research/*.aux
+research/*.bbl
+research/*.blg
+research/*.log
+research/*.out
+research/*.toc
+research/*.fls
+research/*.fdb_latexmk
+research/*.synctex.gz
+outputs/
+papers/external/
 .git.broken-*/

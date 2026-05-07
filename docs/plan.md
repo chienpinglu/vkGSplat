@@ -85,18 +85,24 @@ Current implementation:
 
 ### M6: Ray Tracing Seed Path
 
-Status: first CPU fixture implemented.
+Status: first CPU fixture implemented; real NVIDIA/Wicked smoke gate added.
 
 - Use the Wicked Engine Cornell box path tracing target in `docs/wicked_raytracing_scene.md`.
 - Support a small Vulkan ray tracing API-shaped test.
 - Produce low-resolution, low-sample color/depth/visibility frames.
 - Feed the temporal and denoising path with realistic noisy inputs.
+- Run `scripts/run_wicked_nvidia_smoke.sh` on an RTX/L40-class NVIDIA Vulkan
+  machine to verify the real Wicked path reports SPIR-V, mesh shaders, Vulkan
+  ray tracing, and `capture.ready=yes`.
 
 Current implementation:
 
 - `include/vkgsplat/raytrace_seed.h` defines a Vulkan-ray-tracing-shaped seed-frame contract: top-level acceleration structure, ray-generation shader, miss shader, closest-hit shader, color, depth, NDC depth, primitive ID, and camera matrices.
 - `src/core/raytrace_seed.cpp` implements a small deterministic CPU triangle tracer with low-sample radiance noise.
 - `tests/test_raytrace_seed.cpp` generates two noisy 1-spp frames, derives the M4 camera motion map from NDC depth and matrices, reprojects stable hit history, rejects miss pixels, and feeds the result into the M5 denoiser.
+- `scripts/run_wicked_nvidia_smoke.sh` and the optional
+  `test_wicked_nvidia_vulkan_smoke` CTest entry provide the hardware-gated
+  Wicked/NVIDIA acceptance test.
 
 ### M6.5: Native Apple GPU Backend
 
@@ -115,12 +121,32 @@ Current implementation:
 
 ### M7: CUDA Renderer
 
-Status: target backend after the C++ path is stable.
+Status: M0 bring-up in progress; local validation blocked on machines without
+`nvcc`.
 
 - Port the stable ray-tracing seed/reprojection/denoise contracts to CUDA first, using the Metal backend as an additional portability check.
 - Port temporal reprojection, TAA, and denoising kernels to CUDA.
+- Keep the optional 3DGS CUDA renderer as the first projected-splat software
+  rasterizer scaffold. It now has CUDA preprocess/projection,
+  fixed-capacity deterministic device tile lists/ranges, tile blending, and a
+  public renderer smoke test.
+- Replace the M0 fixed per-tile list with count/scan/scatter plus depth-key
+  sort before treating rasterizer timings as meaningful.
 - Keep SYCL/Triton/other accelerator backends as later portability work behind the same host-visible API.
 - Do not let CUDA-only interop shape the C++ correctness model.
+
+Current implementation:
+
+- `src/cuda/rasterizer.cu` projects Gaussians, evaluates covariance/SH/opacity,
+  builds device-side fixed tile lists/ranges, reports tile-list overflow, and
+  calls the CUDA tile blender.
+- `src/cuda/tile_renderer.cu` runs per-tile front-to-back alpha blending from
+  `GpuProjectedSplat`, sorted indices, and `GpuTileRange`.
+- `tests/test_cuda_tile_renderer.cu` validates the tile blender in isolation.
+- `tests/test_cuda_rasterizer_smoke.cpp` validates the public CUDA renderer
+  path end to end when CUDA is available.
+- `tests/test_cuda_gaussian_reconstruction.cu` validates the tensorized
+  reconstruction kernel suite.
 
 ### M8: Neural Reconstruction Research
 
@@ -133,4 +159,7 @@ Status: optional research branch.
 
 ## Immediate Next Step
 
-Extend M6 from the synthetic triangle fixture toward the Wicked Cornell-box capture contract, port reprojection to Metal, then port the stable seed/reprojection/denoise path to CUDA in M7.
+Run the CUDA renderer/reconstruction tests on an RTX 5090-class workstation with
+CUDA Toolkit 12.8+, then replace the M0 fixed tile-list bridge with
+count/scan/scatter and depth-key sorting. In parallel, keep extending M6 from
+the synthetic triangle fixture toward the Wicked Cornell-box capture contract.

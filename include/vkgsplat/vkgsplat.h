@@ -15,6 +15,7 @@
 #include "denoise.h"
 #include "raytrace_seed.h"
 #include "reprojection.h"
+#include "sensor_model.h"
 #include "tile_raster.h"
 #include "spirv/module.h"
 #include "spirv/translator.h"

@@ -27,6 +27,11 @@ option(VKGSPLAT_ENABLE_3DGS
 option(VKGSPLAT_ENABLE_TORCH
     "Build the optional PyTorch tensor extension for CUDA reconstruction kernels"
     OFF)
+option(VKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS
+    "Register optional Wicked Engine smoke tests that require a real NVIDIA Vulkan GPU"
+    OFF)
+set(VKGSPLAT_CUDA_ARCHITECTURES ""
+    CACHE STRING "CUDA architectures for vkGSplat CUDA targets; empty selects a default list")
 if(APPLE)
     set(VKGSPLAT_ENABLE_METAL_DEFAULT ON)
 else()
@@ -61,6 +66,7 @@ add_library(vkgsplat STATIC
     src/core/denoise.cpp
     src/core/raytrace_seed.cpp
     src/core/reprojection.cpp
+    src/core/sensor_model.cpp
     src/core/tile_raster.cpp
     src/spirv/module.cpp
     src/spirv/translator.cpp
@@ -119,6 +125,12 @@ if(VKGSPLAT_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+    if(NOT VKGSPLAT_CUDA_ARCHITECTURES)
+        set(VKGSPLAT_CUDA_ARCHITECTURES 75 80 86 89 90)
+        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+            list(APPEND VKGSPLAT_CUDA_ARCHITECTURES 120)
+        endif()
+    endif()
 
     set(VKGSPLAT_CUDA_ARCHITECTURES "" CACHE STRING
         "CUDA architectures to build; defaults include Blackwell when supported by the toolkit")

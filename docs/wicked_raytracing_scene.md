@@ -96,6 +96,24 @@ The first vkGSplat-side test should not require building Wicked in CI. It should
 
 Once this fixture passes, repeat with real Wicked exports.
 
+## NVIDIA Hardware Gate
+
+The real Wicked gate is `scripts/run_wicked_nvidia_smoke.sh`. It builds and
+runs the Cornell capture harness from the Wicked checkout, then requires:
+
+- NVIDIA Vulkan adapter selection,
+- SPIR-V shader format,
+- mesh-shader support,
+- Vulkan ray-tracing support,
+- Cornell scene metadata load,
+- `RenderPath3D_PathTracing`,
+- `capture.ready=yes`.
+
+This is intentionally stricter than the Apple/MoltenVK smoke path. MoltenVK can
+prove that Wicked's Vulkan backend starts and consumes SPIR-V locally, but the
+hardware acceptance test must run on an NVIDIA Vulkan stack that exposes the
+ray-tracing and mesh-shader features vkGSplat ultimately needs.
+
 ## Notes
 
 Wicked's path tracing can run as compute ray tracing even without hardware ray tracing acceleration. That is useful for portability, but vkGSplat's target remains CUDA: the C++ path validates the contract first, then the renderer/reprojection/denoising kernels move to CUDA.

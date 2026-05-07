@@ -19,13 +19,13 @@ fixed-function graphics units onto tensor cores. vkGSplat is the architectural
 endpoint of that trajectory — a renderer where seed *and* reconstruction both
 live on tensor-rich compute.
 
-The current implementation plan is tracked in `docs/plan.md`. The important
-near-term decision is that 3DGS is paused as the default path. We keep the
-3DGS renderer in-tree behind `-DVKGSPLAT_ENABLE_3DGS=ON`, but the default build
-now focuses on Vulkan/SPIR-V capture contracts, ray-tracing seed frames,
-temporal reprojection, denoising, native Metal validation on Apple GPUs, and
-CUDA lowering. A neural DLSS-like reconstruction model remains an optional
-research branch after those contracts are stable.
+The current implementation plan is tracked in `docs/plan.md`. The default build
+focuses on Vulkan/SPIR-V capture contracts, ray-tracing seed frames, temporal
+reprojection, denoising, native Metal validation on Apple GPUs, and CUDA
+lowering. The 3DGS renderer remains behind `-DVKGSPLAT_ENABLE_3DGS=ON`; it is
+now also the CUDA renderer bring-up scaffold for projected-splat preprocessing,
+device tile lists, and tile blending. A neural DLSS-like reconstruction model
+remains an optional research branch after those contracts are stable.
 
 ## Active path: Vulkan ray-tracing seeds first
 
@@ -35,8 +35,10 @@ rejection, denoising, and eventually CUDA kernels. This keeps the project
 aligned with the goal of taking Vulkan programs and rendering them on CUDA
 without getting blocked on 3DGS visual quality.
 
-3DGS remains useful research context and an optional backend, but it is no
-longer part of the default milestone gate.
+3DGS remains optional in the default build, but the CUDA 3DGS path is useful as
+the first end-to-end software rasterizer scaffold: it exercises the shared
+`GpuProjectedSplat` / `GpuTileRange` ABI that temporal reconstruction,
+supersampling, and frame-generation kernels should reuse.
 
 ## Repository layout
 
@@ -107,6 +109,72 @@ pass from a normal terminal.
 The paused 3DGS path can be rebuilt explicitly with
 `-DVKGSPLAT_ENABLE_3DGS=ON`; that also enables the 3DGS viewer and
 3DGS-specific tests.
+
+## Current test plan
+
+The local always-on gate is the CPU/Metal-safe suite:
+
+```bash
+cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release -DVKGSPLAT_ENABLE_VULKAN=OFF
+cmake --build build-cpu --parallel 4
+ctest --test-dir build-cpu --output-on-failure
+```
+
+On this Mac, the latest local run passed all 11 default tests. CUDA is not
+validated locally because the machine does not have `nvcc`; CMake stops with
+`Failed to find nvcc`.
+
+On an NVIDIA CUDA workstation, use the RTX 5090 bring-up plan:
+`docs/rtx5090_workstation_test_plan.md`. The CUDA gate currently includes:
+
+- `test_cuda_tile_renderer`: validates the tile blend kernel on a tiny
+  projected-splat fixture.
+- `test_cuda_rasterizer_smoke`: exercises the public `make_renderer("cuda")`
+  path through upload, CUDA preprocess/projection, deterministic fixed-capacity
+  device tile lists/ranges, tile blending, and host-buffer readback.
+- `test_cuda_gaussian_reconstruction`: validates the tensorized reconstruction
+  kernels for nvdiffrast/seed-buffer ingestion, device-side sample counts,
+  tile bin/compact/resolve, gated weighted resolve, state update, and feature
+  projection.
+
+The native Vulkan hardware gate remains separate: run the Wicked/NVIDIA smoke
+test on a Linux or Windows NVIDIA Vulkan stack, then run the CUDA gates, then
+run CUDA+Vulkan interop once both sides independently pass.
+
+## Wicked Engine on NVIDIA Vulkan
+
+The real Wicked acceptance path requires a Linux or Windows machine with an
+NVIDIA Vulkan driver that exposes mesh shaders and ray tracing. On Linux, after
+checking out Wicked Engine into `third_party/WickedEngine`, run:
+
+```bash
+scripts/run_wicked_nvidia_smoke.sh
+```
+
+To register it with CTest while allowing non-NVIDIA machines to skip on Linux:
+
+```bash
+cmake -S . -B build-nvidia-tests \
+  -DVKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS=ON \
+  -DVKGSPLAT_ENABLE_VULKAN=OFF \
+  -DVKGSPLAT_ENABLE_CUDA=OFF
+ctest --test-dir build-nvidia-tests -R test_wicked_nvidia_vulkan_smoke --output-on-failure
+```
+
+On Windows, the same CTest option uses
+`scripts/run_wicked_nvidia_smoke.ps1`; direct use is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_wicked_nvidia_smoke.ps1
+```
+
+The test passes only when Wicked selects an NVIDIA adapter, reports SPIR-V,
+mesh-shader support, ray-tracing support, loads the Cornell asset, and reaches
+`capture.ready=yes`. On this Mac it is expected to skip because MoltenVK does
+not expose the required NVIDIA Vulkan path.
+
+For a new RTX 5090 workstation bring-up, follow
+`docs/rtx5090_workstation_test_plan.md`.
 
 ## Non-goals
 

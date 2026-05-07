@@ -6,9 +6,9 @@ This records the local build used for vkGSplat's first Wicked Engine example.
 
 - Source: `third_party/WickedEngine`
 - Build directory: `third_party/WickedEngine/build-vkgsplat-example`
-- Targets: `Template_Linux`, `vkGSplatCapture`
+- Targets: `Template_Linux`, `vkSplatCapture`
 - Template output: `third_party/WickedEngine/build-vkgsplat-example/Samples/Template_Linux/Template_Linux`
-- Capture output: `third_party/WickedEngine/build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture`
+- Capture output: `third_party/WickedEngine/build-vkgsplat-example/Samples/vkSplatCapture/vkSplatCapture`
 - Platform used here: macOS / Apple Silicon / AppleClang
 
 ## Configure Command
@@ -22,7 +22,7 @@ cmake -S third_party/WickedEngine \
   -DWICKED_TESTS=OFF \
   -DWICKED_IMGUI_EXAMPLE=OFF \
   -DWICKED_LINUX_TEMPLATE=ON \
-  -DWICKED_VKGSPLAT_CAPTURE=ON \
+  -DWICKED_VKSPLAT_CAPTURE=ON \
   -DWICKED_ENABLE_SYMLINKS=OFF \
   -DUSE_SSE4_1=OFF \
   -DUSE_SSE4_2=OFF \
@@ -39,7 +39,7 @@ Build command:
 
 ```bash
 cmake --build third_party/WickedEngine/build-vkgsplat-example --target Template_Linux --parallel 8
-cmake --build third_party/WickedEngine/build-vkgsplat-example --target vkGSplatCapture --parallel 8
+cmake --build third_party/WickedEngine/build-vkgsplat-example --target vkSplatCapture --parallel 8
 ```
 
 ## Local Patches Needed
@@ -90,14 +90,14 @@ Observed smoke-test result on Apple M4:
 
 ## vkGSplat Capture Harness
 
-`Samples/vkGSplatCapture` is a dedicated deterministic harness for vkGSplat integration. It creates a small hidden SDL Vulkan window only so Wicked can query the platform Vulkan instance extensions, constructs `wi::graphics::GraphicsDevice_Vulkan` directly, assigns `wi::graphics::GetDevice()`, initializes Wicked, prints adapter/capability facts, and exits without entering the generic SDL template loop.
+`Samples/vkSplatCapture` is the current dedicated deterministic harness for vkGSplat integration in the local ignored Wicked checkout. It creates a small hidden SDL Vulkan window only so Wicked can query the platform Vulkan instance extensions, constructs `wi::graphics::GraphicsDevice_Vulkan` directly, assigns `wi::graphics::GetDevice()`, initializes Wicked, prints adapter/capability facts, and exits without entering the generic SDL template loop.
 
 Run from `third_party/WickedEngine/WickedEngine`:
 
 ```bash
 DYLD_LIBRARY_PATH=/opt/homebrew/lib \
 VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json \
-../build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture
+../build-vkgsplat-example/Samples/vkSplatCapture/vkSplatCapture
 ```
 
 For the Cornell capture-contract probe:
@@ -105,18 +105,18 @@ For the Cornell capture-contract probe:
 ```bash
 DYLD_LIBRARY_PATH=/opt/homebrew/lib \
 VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json \
-../build-vkgsplat-example/Samples/vkGSplatCapture/vkGSplatCapture --scene
+../build-vkgsplat-example/Samples/vkSplatCapture/vkSplatCapture --scene
 ```
 
 Observed result on Apple M4 / MoltenVK 1.4.1:
 
 ```text
-vkGSplatCapture: initialized=yes
-vkGSplatCapture: adapter=Apple M4
-vkGSplatCapture: driver=MoltenVK: 1.4.1
-vkGSplatCapture: shader_format=spirv
-vkGSplatCapture: capability.mesh_shader=no
-vkGSplatCapture: capability.raytracing=no
+vkSplatCapture: initialized=yes
+vkSplatCapture: adapter=Apple M4
+vkSplatCapture: driver=MoltenVK: 1.4.1
+vkSplatCapture: shader_format=spirv
+vkSplatCapture: capability.mesh_shader=no
+vkSplatCapture: capability.raytracing=no
 ```
 
 This verifies that Wicked's Vulkan backend is available and consumes SPIR-V on this machine. It also shows that MoltenVK does not expose the Vulkan mesh shader or Vulkan ray tracing capabilities needed for the eventual hardware-RT/mesh-shader acceptance test, so that test will need either an RTX-class Vulkan backend or a non-RT fallback path for local Apple runs.
@@ -124,24 +124,41 @@ This verifies that Wicked's Vulkan backend is available and consumes SPIR-V on t
 The `--scene` probe currently avoids Wicked's full OBJ import/render-prep path on MoltenVK because that path repeatedly attempts graphics pipeline variants which fail with `VK_ERROR_INITIALIZATION_FAILED` before any ray-tracing capture can happen. Instead, it scans `cornellbox.obj` metadata, configures the intended path-tracing capture contract, and exits deterministically:
 
 ```text
-vkGSplatCapture: scene.loaded=yes
-vkGSplatCapture: scene.importer=obj-metadata-scan
-vkGSplatCapture: scene.path=../Content/models/cornellbox.obj
-vkGSplatCapture: scene.meshes=1
-vkGSplatCapture: scene.objects=1
-vkGSplatCapture: scene.materials=3
-vkGSplatCapture: scene.vertices=68
-vkGSplatCapture: scene.faces=17
-vkGSplatCapture: camera.resolution=256x256
-vkGSplatCapture: render_path=RenderPath3D_PathTracing
-vkGSplatCapture: capture.surface.color=traceResult
-vkGSplatCapture: capture.surface.depth=traceDepth
-vkGSplatCapture: capture.surface.primitive_id=rtPrimitiveID
-vkGSplatCapture: capture.surface.motion=derived_screen_space_motion
-vkGSplatCapture: capture.ready=no
-vkGSplatCapture: capture.mode=metadata-only-no-vulkan-raytracing
+vkSplatCapture: scene.loaded=yes
+vkSplatCapture: scene.importer=obj-metadata-scan
+vkSplatCapture: scene.path=../Content/models/cornellbox.obj
+vkSplatCapture: scene.meshes=1
+vkSplatCapture: scene.objects=1
+vkSplatCapture: scene.materials=3
+vkSplatCapture: scene.vertices=68
+vkSplatCapture: scene.faces=17
+vkSplatCapture: camera.resolution=256x256
+vkSplatCapture: render_path=RenderPath3D_PathTracing
+vkSplatCapture: capture.surface.color=traceResult
+vkSplatCapture: capture.surface.depth=traceDepth
+vkSplatCapture: capture.surface.primitive_id=rtPrimitiveID
+vkSplatCapture: capture.surface.motion=derived_screen_space_motion
+vkSplatCapture: capture.ready=no
+vkSplatCapture: capture.mode=metadata-only-no-vulkan-raytracing
 ```
 
 ## Next Step
 
-Run the real Wicked importer and `RenderPath3D_PathTracing` capture on an RTX-class Vulkan backend. On MoltenVK, keep the metadata-only capability-gated fallback so local Apple runs report `raytracing=no` instead of failing ambiguously.
+Run the real Wicked importer and `RenderPath3D_PathTracing` capture on an RTX/L40-class NVIDIA Vulkan backend. On MoltenVK, keep the metadata-only capability-gated fallback so local Apple runs report `raytracing=no` instead of failing ambiguously.
+
+The reproducible NVIDIA smoke gate is:
+
+```bash
+scripts/run_wicked_nvidia_smoke.sh
+```
+
+Or through CTest:
+
+```bash
+cmake -S . -B build-nvidia-tests -DVKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS=ON
+ctest --test-dir build-nvidia-tests -R test_wicked_nvidia_vulkan_smoke --output-on-failure
+```
+
+The gate requires Wicked to select an NVIDIA adapter and report
+`shader_format=spirv`, `capability.mesh_shader=yes`,
+`capability.raytracing=yes`, `scene.loaded=yes`, and `capture.ready=yes`.
