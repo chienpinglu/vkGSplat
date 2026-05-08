@@ -494,6 +494,25 @@ __global__ void build_fixed_tile_lists_kernel(int num_gaussians,
     tile_ranges[tile] = { offset, count };
 }
 
+__device__ unsigned char to_unorm8_device(float v) {
+    const float clamped = fminf(fmaxf(v, 0.0f), 1.0f);
+    return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
+}
+
+__global__ void pack_rgba8_kernel(std::size_t pixel_count,
+                                  const float4* __restrict__ src,
+                                  unsigned char* __restrict__ dst) {
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= pixel_count) return;
+
+    const float4 c = src[index];
+    dst[index * 4u + 0u] = to_unorm8_device(c.x);
+    dst[index * 4u + 1u] = to_unorm8_device(c.y);
+    dst[index * 4u + 2u] = to_unorm8_device(c.z);
+    dst[index * 4u + 3u] = to_unorm8_device(c.w);
+}
+
 // ---------------------------------------------------------------------
 // RasterizerImpl — opaque device state for the public Rasterizer class
 // ---------------------------------------------------------------------
@@ -512,6 +531,7 @@ public:
         if (tile_ranges_dev_) cudaFree(tile_ranges_dev_);
         if (tile_overflow_dev_) cudaFree(tile_overflow_dev_);
         if (output_dev_) cudaFree(output_dev_);
+        if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
         if (stream_) cudaStreamDestroy(stream_);
     }
 
@@ -650,9 +670,7 @@ public:
         launch_tile_renderer(tile_launch, projected_dev_, sorted_indices_dev_,
                              tile_ranges_dev_, output_dev_, stream_);
         VKGSPLAT_CUDA_CHECK(cudaGetLastError());
-        VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(target.user_handle, output_dev_,
-                                           sizeof(float4) * desc.width * desc.height,
-                                           cudaMemcpyDeviceToHost, stream_));
+        copy_output_to_target(desc, target);
         VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_tile_overflow_count_,
                                            tile_overflow_dev_,
                                            sizeof(std::uint32_t),
@@ -706,6 +724,46 @@ private:
         }
     }
 
+    void ensure_rgba8_capacity(std::size_t pixel_count) {
+        const std::size_t bytes = pixel_count * 4u;
+        if (bytes > output_rgba8_capacity_bytes_) {
+            if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&output_rgba8_dev_, bytes));
+            output_rgba8_capacity_bytes_ = bytes;
+        }
+    }
+
+    void copy_output_to_target(const ImageDesc& desc, const RenderTarget& target) {
+        const std::size_t pixel_count = static_cast<std::size_t>(desc.width) * desc.height;
+        switch (target.desc.format) {
+        case PixelFormat::R32G32B32A32_SFLOAT:
+        case PixelFormat::UNDEFINED:
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(target.user_handle,
+                                                output_dev_,
+                                                sizeof(float4) * pixel_count,
+                                                cudaMemcpyDeviceToHost,
+                                                stream_));
+            break;
+        case PixelFormat::R8G8B8A8_UNORM:
+        case PixelFormat::R8G8B8A8_SRGB: {
+            ensure_rgba8_capacity(pixel_count);
+            constexpr int threads = 256;
+            const int blocks = static_cast<int>((pixel_count + threads - 1u) / threads);
+            pack_rgba8_kernel<<<blocks, threads, 0, stream_>>>(
+                pixel_count, output_dev_, static_cast<unsigned char*>(output_rgba8_dev_));
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(target.user_handle,
+                                                output_rgba8_dev_,
+                                                pixel_count * 4u,
+                                                cudaMemcpyDeviceToHost,
+                                                stream_));
+            break;
+        }
+        default:
+            throw std::runtime_error("cuda::Rasterizer: HOST_BUFFER target format is not supported");
+        }
+    }
+
     cudaStream_t stream_ = nullptr;
 
     void*                 gaussians_dev_     = nullptr; // Gaussian[gaussian_count_]
@@ -717,10 +775,12 @@ private:
     GpuTileRange*         tile_ranges_dev_     = nullptr;
     std::uint32_t*        tile_overflow_dev_   = nullptr;
     float4*               output_dev_          = nullptr;
+    void*                 output_rgba8_dev_    = nullptr;
     std::size_t           projected_capacity_  = 0;
     std::size_t           sorted_index_capacity_ = 0;
     std::size_t           tile_range_capacity_ = 0;
     std::size_t           output_capacity_     = 0;
+    std::size_t           output_rgba8_capacity_bytes_ = 0;
     std::uint32_t         last_tile_overflow_count_ = 0;
     bool                  reported_tile_overflow_ = false;
 

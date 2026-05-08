@@ -36,4 +36,13 @@ void launch_tile_renderer(const TileRendererLaunch& launch,
                           float4* output_rgba,
                           void* cuda_stream);
 
+// Writes packed RGBA8 directly into a CUDA surface object, e.g. the CUDA side
+// of an imported Vulkan image from interop::ExternalImage::cuda_surface().
+void launch_tile_renderer_surface_rgba8(const TileRendererLaunch& launch,
+                                        const GpuProjectedSplat* projected,
+                                        const std::uint32_t* sorted_projected_indices,
+                                        const GpuTileRange* tile_ranges,
+                                        void* cuda_surface,
+                                        void* cuda_stream);
+
 } // namespace vkgsplat::cuda

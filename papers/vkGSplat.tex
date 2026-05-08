@@ -60,7 +60,10 @@ state stores geometry, radiance, motion, visibility, variance, and confidence;
 classical filters, Gaussian splatting, and neural/world-model components then
 denoise, supersample, interpolate, predict, and propose counterfactuals. The
 system returns to a physical or sensor oracle when uncertainty, rare events, or
-task risk exceed the learned model's validation envelope.
+task risk exceed the learned model's validation envelope. Crucially, synthetic
+data generation and model training form a closed loop: the current robot model
+acts in the simulated or reconstructed world, its failures and uncertainty drive
+new acquisitions, and the resulting synthetic data revises the next model.
 This framing explains several otherwise separate trends. DLSS-class rendering
 already treats rasterization and ray tracing as sparse acquisition followed by
 tensor-side reconstruction~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,nvidia-dlss35rr}.
@@ -84,11 +87,11 @@ or when the renderer must expose custom sample statistics and explicit Gaussian
 state updates. vkGSplat is not the whole thesis; it is the concrete test of
 whether physical-evidence acquisition, explicit Gaussian state, PyTorch-centered
 orchestration, and tensor-rich hardware can form a practical data-generation
-substrate. As a falsifiable system target, we aim for \textbf{$\geq 100$
-images\slash s\slash H100} at $1024{\times}1024$ from a captured 3DGS scene,
-\textbf{$\leq 0.5$ J\slash image} on H100-class hardware, and
-\textbf{within $2{\times}$ of an RTX-class graphics-hardware baseline (L40) on
-dollars per image}, while preserving downstream sim-to-real task accuracy.
+substrate. As a falsifiable milestone rather than a reported result, we target
+\textbf{$\geq 100$ images\slash s\slash H100} at $1024{\times}1024$ from a
+captured 3DGS scene, \textbf{$\leq 0.5$ J\slash image} on H100-class hardware,
+and \textbf{within $2{\times}$ of an RTX-class graphics-hardware baseline (L40)
+on dollars per image}, while preserving downstream sim-to-real task accuracy.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -124,6 +127,15 @@ variance, disocclusion, distribution shift, or safety-critical task risk --- the
 system returns to a physical or sensor oracle. Put simply: AI should reduce the
 cost of acquiring, storing, reconstructing, and querying physical truth; it
 should not silently replace physical truth.
+
+This is not an open-loop dataset factory. The robot or embodied agent being
+trained is part of the data-generation loop. A current perception, policy, or
+world model acts in the simulated or reconstructed world; its rollouts expose
+uncertain states, failures, near misses, and rare contacts; vkGSplat then
+acquires or reconstructs the evidence needed to turn those events into new
+training examples. The revised model changes the next rollout distribution.
+Synthetic data generation and model training are therefore coupled, not staged as
+``render once, train later.''
 
 This loop also changes the time structure of rendering. A game renderer must
 rebuild enough of the world to satisfy the next display frame. A SDG system can
@@ -177,8 +189,8 @@ then a compute-first implementation becomes plausible. The question is not
 whether graphics hardware disappears, but when the Vulkan execution contract
 should be allowed to move off fixed-function graphics units.
 
-There is also a blunt economic motivation. The AI data center has become a
-hundred-billion-dollar capital program: Microsoft described an approximately
+There is also a blunt economic motivation. The AI data center (AIDC) has become
+a hundred-billion-dollar capital program: Microsoft described an approximately
 \$80B FY2025 investment in AI-enabled datacenters, Alphabet guided to roughly
 \$75B of 2025 capital expenditures, and Meta raised its 2025 capital-expenditure
 outlook to \$70--72B while warning that 2026 growth would be driven primarily by
@@ -188,8 +200,12 @@ Data Center World 2026 material frames the period as a ``trillion dollar''
 AIDC boom, estimates \$6.07T of total IT spending in 2026, reports that
 72.9\% of surveyed organizations expect IT-budget growth in 2026, and projects
 data-center investment approaching \$1.9T by 2030 under a 20\% CAGR scenario
-\cite{omdia-dcw-oas-2026}. The implication is that SDG architecture must fit a
-capital program that is already large, power-constrained, and operations-heavy.
+\cite{omdia-dcw-oas-2026}. The same deck points to rack-scale AI systems,
+800VDC power distribution, BESS, self-generation, and liquid cooling as
+near-term data-center design pressures. We use this as market and infrastructure
+evidence, not as a law of nature. The implication is that SDG architecture must
+fit a capital program that is already large, power-constrained, and
+operations-heavy.
 In that world, the goal is not to beat NVIDIA's RTX approach on its own terms.
 RTX/Omniverse/Isaac-style SDG is the natural baseline when a graphics fleet is
 already the production substrate. The problem is that many organizations are
@@ -215,6 +231,19 @@ cooling envelopes, driver stacks, job schedulers, telemetry, and data movement
 between simulation and training. A compute-first Vulkan path is attractive
 precisely because it tries to collapse that split into one programmable AI
 infrastructure substrate.
+
+Concretely, making SDG AIDC-native requires addressing three NVIDIA-shaped
+frictions, not merely replacing one renderer. First, OVX/DGX segregation turns
+simulation/graphics and training/inference into different production substrates.
+Second, fixed-function graphics hardware ties acquisition to RTX-style
+availability, driver queues, and image-oriented contracts even when the
+downstream consumer is a tensor pipeline. Third, DLSS-class reconstruction
+shows where much of the value has moved, but it is proprietary and
+product-tuned for games rather than an open SDG evidence contract. vkGSplat
+treats these as boundary problems: keep Vulkan, RTX, Omniverse, and OVX/DGX
+paths compatible where they are the right substrate, but also define a
+seed-buffer and explicit-state reconstruction stack that can live inside
+CUDA/PyTorch on the AI cluster.
 
 \textbf{vkGSplat} is the concrete reference implementation for this broader
 architecture. It preserves Vulkan as an application boundary, treats hardware
@@ -847,38 +876,45 @@ the workload.  As more of the delivered value moves into stages that
 keep improving with model capacity, inference compute, temporal history,
 and software updates, the efficiency bar for narrow specialization rises.
 
+The slide-level equation is the following. Let $x$ be the fraction of
+the hardware or cluster budget assigned to specialized graphics logic,
+$R$ its relative efficiency advantage on the bounded acquisition share,
+and $S$ the value-scalable share whose utility keeps improving on
+programmable compute:
+\begin{equation}
+\boxed{
+\begin{aligned}
+  \mathcal{T}(x;S,R)
+  &= \frac{1-S}{1+(R-1)x} + \frac{S}{1-x},\\
+  R_c(S) &= \frac{1}{1-S}
+  \quad\Longleftrightarrow\quad
+  S_c(R)=1-\frac{1}{R}.
+\end{aligned}}
+\label{eq:main-modern-amdahl}
+\end{equation}
+Here $\mathcal{T}$ is a normalized cost proxy for producing one useful SDG
+sample; lower is better. It is not meant to predict a single frame time. It is a
+first-order allocation model that ignores second-order effects such as
+interconnect topology, utilization policy, and data movement except insofar as
+they change the effective $R$ or the measured scalable share $S$. In vkGSplat,
+$S$ should be estimated empirically by ablating acquisition, reconstruction,
+training, and world-model stages on a fixed workload. The interpretation is
+deliberately sharp: as reconstruction and learned world modeling push $S$ toward
+one, the efficiency ratio required to justify a separate fixed-function
+allocation diverges. This is the modernized Amdahl argument for making SDG a
+compute-first AI datacenter workload rather than a separate graphics-cluster
+workload.
+
 This is exactly the structure of modern rendering.  Visibility, shadow
 tests, depth, motion vectors, and sparse radiance are bounded acquisition
 signals once the camera, resolution, and sample budget are chosen.  The
 stage that still scales in value is reconstruction: denoising,
 anti-aliasing, super-resolution, frame synthesis, neural radiance
-caching, and eventually 3DGS or world-model reconstruction.
-Figure~\ref{fig:amdahl-reconstruction-example} shows the same principle in a
-small rendering example: a noisy low-sample acquisition can become a
-useful image once a reconstruction stage consumes it.
-
-\begin{figure*}[t]
-\centering
-\begin{minipage}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{output/oidn_sponza_noisy.png}
-
-\small \textbf{Low-sample acquisition}
-\end{minipage}
-\hfill
-\begin{minipage}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{output/oidn_sponza_denoised.png}
-
-\small \textbf{Reconstructed image}
-\end{minipage}
-\caption{Rendering as acquisition plus reconstruction.  A low-sample
-Monte Carlo image is a sparse, noisy acquisition signal; a denoising or
-neural reconstruction stage recovers the image that downstream consumers
-actually use.  The example is the Crytek Sponza scene from the Intel
-Open Image Denoise gallery~\cite{intel-oidn}.}
-\label{fig:amdahl-reconstruction-example}
-\end{figure*}
+caching, and eventually 3DGS or world-model reconstruction. The same
+principle appears in any low-sample Monte Carlo renderer: the seed is a
+sparse, noisy acquisition signal, while the denoising or neural
+reconstruction stage recovers the image that downstream consumers
+actually use.
 
 For real-time games, specialized acquisition hardware can remain the
 right trade because the 16-ms display budget makes fixed-function
@@ -976,10 +1012,43 @@ reusable static base; simulation produces dynamic overlays; update/invalidation
 marks what changed; acquisition collects sparse physical evidence through
 hardware Vulkan, RT/path tracing, or sensor models; reconstruction turns that
 evidence into dense images, labels, sensor streams, Gaussian state, and radiance
-caches. Uncertainty and validity epochs decide whether to reuse state, locally
-reacquire evidence, or return to the oracle or rebuild stage.}
+caches. The consumer is usually the next robot or world model, whose rollout
+distribution feeds back into simulation. Uncertainty and validity epochs decide
+whether to reuse state, locally reacquire evidence, or return to the oracle or
+rebuild stage.}
 \label{fig:sdg-lifecycle}
 \end{figure}
+
+\subsection{Closed-loop model training}
+\label{sec:closed-loop-training}
+
+The lifecycle in Fig.~\ref{fig:sdg-lifecycle} is also a training loop. Let
+$M_{\theta_k}$ be the current robot model: a perception model, policy, planner,
+world model, or a coupled stack of these components. At iteration $k$, that
+model acts in the simulated or reconstructed world, producing trajectories
+$\tau_k$, task outcomes, uncertainty signals, and failure cases. vkGSplat then
+uses those signals to choose what to acquire, reconstruct, label, and refresh:
+\begin{equation}
+\boxed{
+\begin{aligned}
+  \tau_k
+    &\sim \mathrm{Rollout}(M_{\theta_k}, S_t),\\
+  \mathcal{D}^{\mathrm{syn}}_k
+    &= \mathrm{AcquireReconstructLabel}(\tau_k, \mathcal{G}_t, Q_s),\\
+  \theta_{k+1}
+    &= \mathrm{Train}\!\left(\theta_k,
+       \mathcal{D}^{\mathrm{real}} \cup \mathcal{D}^{\mathrm{syn}}_k,
+       \mathcal{L}_{\mathrm{task}}\right).
+\end{aligned}}
+\label{eq:closed-loop-sdg-training}
+\end{equation}
+The important point is that $\mathcal{D}^{\mathrm{syn}}_k$ is not sampled from a
+fixed offline distribution. It is shaped by the current model's behavior: where
+the robot collides, hesitates, misperceives, loses contact, fails grasp
+closure, violates a safety margin, or produces high epistemic uncertainty. This
+turns SDG into active data generation. The model asks the world for the data it
+needs next; acquisition and reconstruction make that data cheap enough to
+generate at scale; training changes the model that will ask the next question.
 
 We should therefore model a generated world as an amortized static base plus
 dynamic overlays:
@@ -1371,6 +1440,8 @@ data-center buildout.}
 Capital plan & Dedicated graphics procurement and refresh cycle & Rides existing AI accelerator capex and depreciation schedule \\
 Utilization & Must keep a rendering fleet busy enough to justify ownership & Can fill training gaps, off-peak windows, and batched data-generation queues \\
 Software stack & Renderer-specific deployment, driver, profiling, and observability path & CUDA/PyTorch containers, standard cluster telemetry, common job scheduler \\
+Graphics hardware assumption & Relies on RTX-class fixed-function graphics where acquisition cost, driver queues, and framebuffer contracts are natural & Keeps hardware Vulkan as a valid oracle but adds CUDA software acquisition for AI accelerators without graphics-specific silicon \\
+Reconstruction control & DLSS-class reconstruction is powerful but proprietary, product-tuned, and game/display-oriented & Uses open Gaussian/radiance history, temporal gates, SR, denoising, frame interpolation, and optional learned residuals \\
 Data movement & Simulation cluster emits data that must be moved to AI training storage & Acquisition, reconstruction, world models, and training can share device or nearby storage paths \\
 Optimization target & Per-frame or per-ray graphics performance & Physical evidence, labels, sensor streams, and task accuracy per dollar or joule \\
 Organizational fit & Treated as a specialized simulation/graphics service adjacent to the AI factory & Treated as another AI workload beside training, inference, evaluation, and data processing \\
@@ -1826,7 +1897,11 @@ flow vkGSplat is built for.
 
 \textbf{Cost \& energy.} Dollars-per-image and joules-per-image on a
 range of accelerators (H100, B200, A100, L40, MI300, TPU~v5e). The L40
-serves as a graphics-hardware baseline; the rest are pure compute.
+serves as a graphics-hardware baseline; the rest are pure compute. Because the
+economic claim is about AIDC compatibility rather than peak ray throughput, we
+also report queue fill, device utilization, host-device copies, cross-cluster
+data movement, and whether acquisition, reconstruction, and training can share
+one scheduler and storage locality.
 
 \textbf{Downstream task accuracy.} Train a small object-detection or
 manipulation policy on data generated by vkGSplat vs.\ data generated by
@@ -1834,18 +1909,29 @@ Isaac~Sim or BlenderProc, controlling for total training compute. The
 hypothesis is that vkGSplat data is at least competitive on per-dollar
 performance.
 
+\textbf{Closed-loop data generation.} Run the same robot or perception model
+through a static synthetic dataset, a random-domain-randomization dataset, and
+an active vkGSplat loop where failures, high uncertainty, disocclusions, contact
+events, and sensor-confidence failures request new acquisition. Report
+downstream improvement per synthetic sample, failures recovered per GPU-hour,
+oracle-refresh rate, uncertainty calibration, and the fraction of generated
+data that is actually used by training. This is the direct test of
+Eq.~\ref{eq:closed-loop-sdg-training}: SDG is valuable only if the next model
+improves because the current model asked for better data.
+
 Concretely, Table~\ref{tab:eval} fixes the matrix we will report.
 Each cell is a (scene family, hardware, backend, renderer)
 configuration; we report throughput, $\$\slash\textrm{image}$, and
 $\textrm{J}\slash\textrm{image}$ as the primary metrics, with PSNR /
 SSIM / LPIPS against held-out reference renders for image quality.
-Downstream task accuracy is reported on a single curated robotics
-benchmark (object-detection mAP on a held-out test set, plus a small
-manipulation-policy success rate) rather than chasing a long tail of
-benchmarks; the goal is to falsify the hypothesis ``models trained on
-vkGSplat data are competitive per dollar with models trained on
-Isaac~Sim or BlenderProc data,'' not to exhaustively characterize
-sim-to-real transfer.
+Downstream task accuracy is reported on a single curated robotics benchmark
+(object-detection mAP on a held-out test set, plus a small manipulation-policy
+success rate) rather than chasing a long tail of benchmarks; the goal is to
+falsify the hypothesis ``models trained on vkGSplat data are competitive per
+dollar with models trained on Isaac~Sim or BlenderProc data,'' not to
+exhaustively characterize sim-to-real transfer. The closed-loop variant is
+reported separately because it tests a stronger claim: the generator is no
+longer a passive image factory but part of the training control loop.
 
 We also evaluate the world-building claim directly. For each scene we separate
 one-time build cost from per-frame acquisition cost:

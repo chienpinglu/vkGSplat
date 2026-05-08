@@ -8,8 +8,11 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace {
@@ -26,6 +29,11 @@ namespace {
 
 bool near(float a, float b, float eps = 1.0e-4f) {
     return std::abs(a - b) <= eps;
+}
+
+bool near_u8(std::uint8_t a, std::uint8_t b, std::uint8_t eps = 1) {
+    const int delta = static_cast<int>(a) - static_cast<int>(b);
+    return std::abs(delta) <= static_cast<int>(eps);
 }
 
 vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
@@ -106,6 +114,50 @@ int main() {
         std::fprintf(stderr,
                      "CUDA rasterizer did not blend near red over far blue: center=(%.4f %.4f %.4f %.4f)\n",
                      center.x, center.y, center.z, center.w);
+        return 1;
+    }
+
+    std::vector<std::uint8_t> pixels_u8(16 * 16 * 4, 255);
+    const RenderTarget target_u8{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R8G8B8A8_UNORM, 1, 1 },
+        pixels_u8.data(),
+    };
+    const FrameId frame_u8 = renderer->render(camera, params, target_u8);
+    renderer->wait(frame_u8);
+
+    if (pixels_u8[0] != 0 || pixels_u8[1] != 0 ||
+        pixels_u8[2] != 0 || pixels_u8[3] != 0) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer did not pack RGBA8 background: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(pixels_u8[0]),
+                     static_cast<unsigned>(pixels_u8[1]),
+                     static_cast<unsigned>(pixels_u8[2]),
+                     static_cast<unsigned>(pixels_u8[3]));
+        return 1;
+    }
+
+    const std::size_t center_u8 = (8 * 16 + 8) * 4;
+    if (!(pixels_u8[center_u8 + 0] > 90 &&
+          pixels_u8[center_u8 + 2] > 10 &&
+          pixels_u8[center_u8 + 0] > pixels_u8[center_u8 + 2])) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer RGBA8 center did not preserve red-over-blue order: center=(%u %u %u %u)\n",
+                     static_cast<unsigned>(pixels_u8[center_u8 + 0]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 1]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 2]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 3]));
+        return 1;
+    }
+
+    const auto expected_alpha = static_cast<std::uint8_t>(
+        std::min(255.0f, std::max(0.0f, center.w) * 255.0f + 0.5f));
+    if (!near_u8(pixels_u8[center_u8 + 3], expected_alpha, 2)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer RGBA8 alpha mismatch: packed=%u float=%.4f expected=%u\n",
+                     static_cast<unsigned>(pixels_u8[center_u8 + 3]),
+                     center.w,
+                     static_cast<unsigned>(expected_alpha));
         return 1;
     }
 

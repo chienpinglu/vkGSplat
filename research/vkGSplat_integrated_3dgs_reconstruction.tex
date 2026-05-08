@@ -53,6 +53,18 @@ research bet is that explicit geometry, motion, variance, identity, and
 confidence should reduce what a neural model must learn, not force vkGSplat to
 replicate a proprietary DLSS-scale training pipeline.
 
+The data-center constraint is part of the technical problem. Omdia's Data
+Center World / Analyst Summit 2026 deck frames AIDC growth as a trillion-dollar
+infrastructure wave, with \$6.07T total IT spending in 2026, 72.9\% of surveyed
+organizations expecting IT-budget increases, an upper data-center investment
+scenario near \$1.9T by 2030, rack-scale AI systems, 800VDC power distribution,
+BESS, self-generation, and liquid cooling moving into the mainstream
+\cite{omdia2026dcw}. For this note, those numbers do not prove that a Gaussian
+reconstructor wins. They define the operating constraint: the reconstruction
+state must look like a normal AI-data-center tensor workload, not a bespoke
+graphics island that forces separate scheduling, storage, cooling, profiling,
+and deployment paths.
+
 This does \emph{not} mean vkGSplat can directly clone DLSS 4.5 or the
 announced DLSS 5 target. NVIDIA's DLSS 4.5 combines a second-generation
 transformer Super Resolution model, Dynamic Multi Frame Generation, 6X Multi
@@ -187,6 +199,44 @@ The clean test is whether a recorded seed buffer can be replayed through the
 reconstruction layer with no acquisition backend present. If it can, the stack
 is modular. If reconstruction code requires calling a particular renderer, the
 boundary has failed.
+
+\section{AIDC Constraint on the Reconstruction Layer}
+
+The main vkGSplat paper makes the economic argument: SDG should be able to run
+as an ordinary workload on the AI data center when that is where the capital,
+power, cooling, scheduling, and model-training infrastructure already exists.
+This note turns that argument into reconstruction-kernel constraints. The
+Gaussian state is useful only if it is a \emph{resident tensor state}: compact
+enough to stay near the compute, structured enough for PyTorch/CUDA extension
+interop, and reusable enough that TAA, super-resolution, denoising, frame
+generation, radiance caching, and neural resolving do not each build their own
+history representation.
+
+\begin{center}
+\begin{tabular}{p{0.31\linewidth}p{0.58\linewidth}}
+\toprule
+Omdia/AIDC signal & Reconstruction consequence for vkGSplat \\
+\midrule
+Rack-scale AI systems and high-power AI clusters & Keep acquisition, Gaussian
+update, reconstruction, and training in one CUDA/PyTorch residency domain. \\
+800VDC, BESS, self-generation, and liquid-cooling pressure & Optimize
+joules/useful-sample and HBM bytes, not only per-frame latency. \\
+Token demand rising from generative, agentic, and Physical AI workloads & Treat
+SDG as a batch/streaming tensor workload that can fill AI-cluster capacity. \\
+AI-capex scale and operational lock-in & Avoid designs requiring a separate
+graphics-only fleet unless they clearly win on end-to-end cost. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The direct kernel implication is that the shared Gaussian state must expose
+AIDC-style counters in every experiment: device-resident bytes, HBM traffic,
+kernel launches, tensor-core utilization where relevant, sort/prefix-scan cost,
+host-device copies, interop copies, energy per reconstructed output, and reuse
+count per Gaussian page or tile list. If the unified state improves PSNR or
+temporal stability but forces extra data movement across a graphics/AI boundary,
+it has failed the system-level vkGSplat argument even if it looks good in an
+isolated renderer.
 
 \section{Relevant Research}
 
@@ -3160,8 +3210,36 @@ Each experiment should report:
   \item occupancy, register pressure, and shared-memory use for update and
         projection kernels,
   \item memory footprint for image-space baselines, separate Gaussian states,
-        and the shared Gaussian state.
+        and the shared Gaussian state,
+  \item host-device copies, Vulkan/CUDA interop copies, and cross-process or
+        cross-cluster transfers,
+  \item energy per useful reconstructed output, not only energy per raw frame.
 \end{itemize}
+
+\subsection{AIDC Residency Metrics}
+
+The Omdia-driven system constraint is that vkGSplat should behave like an
+AI-data-center workload. Each benchmark should therefore report a residency
+score in addition to visual quality:
+
+\[
+  R_{\mathrm{aidc}} =
+  1 -
+  \frac{
+    B_{\mathrm{host}} + B_{\mathrm{interop}} + B_{\mathrm{remote}}
+  }{
+    B_{\mathrm{device}} + B_{\mathrm{host}} + B_{\mathrm{interop}}
+    + B_{\mathrm{remote}} + \epsilon
+  },
+\]
+where $B_{\mathrm{device}}$ is useful device-resident traffic inside the CUDA
+pipeline, $B_{\mathrm{host}}$ is host readback/writeback, $B_{\mathrm{interop}}$
+is graphics/compute interop copying, and $B_{\mathrm{remote}}$ is data moved to
+another storage or cluster boundary. A successful vkGSplat reconstruction path
+should keep $R_{\mathrm{aidc}}$ close to one while improving quality or reuse.
+This metric makes the economic claim measurable: a visually strong
+reconstructor that exports large intermediate images to a separate graphics or
+storage path is not AIDC-native.
 
 \subsection{GPU Integration Score}
 
@@ -3257,12 +3335,19 @@ The decisive ablation should hold sample inputs, jitter, and camera path fixed:
   \item \textbf{Shared core:} one $C_j$ with task subslots.
   \item \textbf{Shared core plus neural residual:} same as above, with
         projected Gaussian feature planes.
+  \item \textbf{Shared core plus AIDC residency constraint:} same as variant 3
+        or 4, but disallow host readback and cross-cluster intermediate images;
+        all seed tensors, Gaussian pages, radiance pages, and training batches
+        must remain CUDA/PyTorch resident until final dataset export.
 \end{enumerate}
 
 The integration hypothesis is supported only if variant 3 beats variant 2 on
 cost or consistency while staying close in quality. Variant 4 is useful only if
 the learned residual uses Gaussian features; test this by zeroing $\Phi_t$ at
-validation time and measuring the error jump.
+validation time and measuring the error jump. Variant 5 is the system-level
+gate: if it loses most of the quality or throughput gain, the reconstruction
+idea may be interesting but it does not support the main vkGSplat economic
+argument.
 
 \section{Minimal Demonstration in the Current vkGSplat Workspace}
 
@@ -4029,6 +4114,13 @@ AMD.
 \newblock AMD FSR Technologies.
 \newblock Accessed May 5, 2026.
 \newblock \url{https://www.amd.com/en/products/graphics/technologies/fidelityfx/super-resolution.html}
+
+\bibitem{omdia2026dcw}
+Omdia.
+\newblock Data Center World / Omdia Analyst Summit 2026: The Trillion Dollar
+AIDC Boom.
+\newblock Presentation deck, April 2026. Local source file:
+\texttt{ai\_progress/external/DCW OAS 2026.pdf}.
 
 \end{thebibliography}
 
