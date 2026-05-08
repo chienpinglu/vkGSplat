@@ -240,9 +240,15 @@ availability, driver queues, and image-oriented contracts even when the
 downstream consumer is a tensor pipeline. Third, DLSS-class reconstruction
 shows where much of the value has moved, but it is proprietary and
 product-tuned for games rather than an open SDG evidence contract. vkGSplat
-treats these as boundary problems: keep Vulkan, RTX, Omniverse, and OVX/DGX
-paths compatible where they are the right substrate, but also define a
-seed-buffer and explicit-state reconstruction stack that can live inside
+treats these as boundary problems. CUDA software rendering is the response to
+fixed-function graphics dependence: it preserves the Vulkan acquisition
+contract while allowing the work to run on AI accelerators without graphics
+blocks. Integrated 3DGS reconstruction is the response to the DLSS boundary:
+instead of a closed image-space upscaler, vkGSplat exposes a persistent
+Gaussian/radiance state for denoising, temporal reuse, super-resolution, frame
+interpolation, and optional learned residuals. Vulkan, RTX, Omniverse, and
+OVX/DGX paths remain compatible where they are the right substrate, but the same
+seed-buffer and explicit-state reconstruction stack can also live inside
 CUDA/PyTorch on the AI cluster.
 
 \textbf{vkGSplat} is the concrete reference implementation for this broader
@@ -958,53 +964,52 @@ labels, Gaussian state, radiance caches, and sensor outputs.
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   phase/.style={draw, rounded corners=2pt, very thick, align=center,
-    text width=2.85cm, minimum height=1.18cm, font=\small},
-  store/.style={draw, dashed, rounded corners=2pt, align=center,
-    text width=4.7cm, minimum height=1.05cm, font=\small, fill=plotgreen!8},
+    text width=2.55cm, minimum height=1.08cm, font=\scriptsize},
+  statebox/.style={draw, dashed, rounded corners=2pt, align=center,
+    text width=11.9cm, minimum height=1.12cm, font=\scriptsize,
+    fill=plotgreen!8},
   edge/.style={-{Latex[length=2mm]}, thick},
   feedback/.style={-{Latex[length=2mm]}, thick, dashed},
-  note/.style={align=center, font=\scriptsize}
+  exchange/.style={Latex-Latex, thick, dashed},
+  note/.style={align=center, font=\scriptsize, inner sep=1pt}
 ]
 \node[phase, fill=plotblue!10] (build) at (0,0)
-  {\textbf{Build}\\static world $\mathcal{W}_0$\\geometry, materials, lights\\BVH, 3DGS, caches};
-\node[phase, fill=plotcyan!10] (simulate) at (3.55,0)
+  {\textbf{Build}\\static world $\mathcal{W}_0$\\geometry, materials\\BVH, 3DGS, caches};
+\node[phase, fill=plotcyan!10] (simulate) at (3.15,0)
   {\textbf{Simulate}\\dynamic state $\mathcal{D}_t$\\robots, contacts\\objects, lights};
-\node[phase, fill=plotyellow!15] (update) at (7.10,0)
+\node[phase, fill=plotyellow!15] (update) at (6.30,0)
   {\textbf{Update}\\transforms, epochs\\dirty regions\\confidence decay};
-\node[phase, fill=plotred!10] (acquire) at (10.65,0)
-  {\textbf{Acquire}\\Vulkan, RT, sensors\\seed buffers\\sparse physical truth};
-\node[phase, fill=plotgreen!12] (reconstruct) at (14.20,0)
+\node[phase, fill=plotred!10] (acquire) at (9.45,0)
+  {\textbf{Acquire}\\Vulkan, RT, sensors\\seed buffers\\sparse truth};
+\node[phase, fill=plotgreen!12] (reconstruct) at (12.60,0)
   {\textbf{Reconstruct}\\Gaussian/radiance state\\denoise, TAA, SR\\frame interpolation};
 
-\node[store] (state) at (7.10,-1.95)
+\node[statebox] (state) at (6.30,-1.85)
   {\textbf{Persistent explicit state}\\
-   $\mathcal{W}_0$ static base, $\mathcal{D}_t$ dynamic overlay, $\mathcal{G}_t$ Gaussian state,\\
-   radiance caches, sensor history, variance, confidence, and validity epochs};
-\node[phase, fill=white] (oracle) at (1.8,-3.55)
-  {\textbf{Oracle refresh}\\extra rays, path depth\\sensor simulator\\physics/material checks};
-\node[phase, fill=white] (consumer) at (12.35,-3.55)
+   $\mathcal{W}_0$ static base \quad $\mathcal{D}_t$ dynamic overlay \quad $\mathcal{G}_t$ Gaussian/radiance state\\
+   caches, sensor history, variance, confidence, and validity epochs};
+\node[phase, fill=white] (oracle) at (1.65,-3.70)
+  {\textbf{Oracle refresh}\\extra rays/path depth\\sensor simulator\\physics checks};
+\node[phase, fill=white] (consumer) at (10.95,-3.70)
   {\textbf{Consumers}\\images, labels\\sensor streams\\training rollouts};
+
+\coordinate (stateBuild) at ($(state.north west)+(1.15,0)$);
+\coordinate (stateUpdate) at (state.north);
+\coordinate (stateRecon) at ($(state.north east)+(-1.15,0)$);
+\coordinate (stateQuery) at ($(state.north east)+(-3.15,0)$);
 
 \draw[edge] (build) -- (simulate);
 \draw[edge] (simulate) -- (update);
 \draw[edge] (update) -- (acquire);
 \draw[edge] (acquire) -- (reconstruct);
-\draw[edge] (reconstruct) -- node[note, right] {fused evidence} (consumer);
+\draw[edge] (build.south) -- (stateBuild);
+\draw[edge] (update.south) -- (stateUpdate);
+\draw[edge] (reconstruct.south) -- (stateRecon);
+\draw[edge] (stateQuery) -- (acquire.south);
 
-\draw[edge] (build.south) |- (state.west);
-\draw[edge] (update.south) -- (state.north);
-\draw[edge] (state.east) -| node[note, pos=0.78, right] {queries} (acquire.south);
-\draw[edge] (reconstruct.south) |- (state.east);
-\draw[edge] (consumer.west) -- node[note, above] {policy or randomization} (oracle.east);
-
-\draw[feedback] (reconstruct.south west) to[bend left=14]
-  node[note, below] {uncertainty / epoch mismatch} (oracle.north east);
-\draw[feedback] (oracle.north west) to[bend left=18]
-  node[note, left] {large drift} (build.south west);
-\draw[feedback] (oracle.north) to[bend right=8]
-  node[note, above] {localized reacquisition} (acquire.south west);
-\draw[feedback] (consumer.north) to[bend right=16]
-  node[note, right] {next rollout} (simulate.south);
+\draw[edge] (reconstruct.south east) to[out=-65,in=65] (consumer.north east);
+\draw[feedback] (consumer.north) -- (state.south east);
+\draw[exchange] (state.south west) -- (oracle.north);
 \end{tikzpicture}%
 }
 \caption{Whole SDG lifecycle for vkGSplat. Expensive world building creates a
@@ -1440,8 +1445,8 @@ data-center buildout.}
 Capital plan & Dedicated graphics procurement and refresh cycle & Rides existing AI accelerator capex and depreciation schedule \\
 Utilization & Must keep a rendering fleet busy enough to justify ownership & Can fill training gaps, off-peak windows, and batched data-generation queues \\
 Software stack & Renderer-specific deployment, driver, profiling, and observability path & CUDA/PyTorch containers, standard cluster telemetry, common job scheduler \\
-Graphics hardware assumption & Relies on RTX-class fixed-function graphics where acquisition cost, driver queues, and framebuffer contracts are natural & Keeps hardware Vulkan as a valid oracle but adds CUDA software acquisition for AI accelerators without graphics-specific silicon \\
-Reconstruction control & DLSS-class reconstruction is powerful but proprietary, product-tuned, and game/display-oriented & Uses open Gaussian/radiance history, temporal gates, SR, denoising, frame interpolation, and optional learned residuals \\
+Graphics hardware assumption & Relies on RTX-class fixed-function graphics where acquisition cost, driver queues, and framebuffer contracts are natural & Uses software rendering to preserve the Vulkan acquisition contract while running on AI accelerators without graphics-specific silicon \\
+Reconstruction control & DLSS-class reconstruction is powerful but proprietary, product-tuned, and game/display-oriented & Uses integrated 3DGS state as an open DLSS-class counterpart: Gaussian/radiance history, temporal gates, SR, denoising, frame interpolation, and optional learned residuals \\
 Data movement & Simulation cluster emits data that must be moved to AI training storage & Acquisition, reconstruction, world models, and training can share device or nearby storage paths \\
 Optimization target & Per-frame or per-ray graphics performance & Physical evidence, labels, sensor streams, and task accuracy per dollar or joule \\
 Organizational fit & Treated as a specialized simulation/graphics service adjacent to the AI factory & Treated as another AI workload beside training, inference, evaluation, and data processing \\
