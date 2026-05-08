@@ -161,5 +161,70 @@ int main() {
         return 1;
     }
 
+    cudaArray_t surface_array = nullptr;
+    cudaSurfaceObject_t surface = 0;
+    const cudaChannelFormatDesc channel_desc =
+        cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
+    CHECK_CUDA(cudaMallocArray(&surface_array,
+                               &channel_desc,
+                               16,
+                               16,
+                               cudaArraySurfaceLoadStore));
+
+    cudaResourceDesc resource_desc{};
+    resource_desc.resType = cudaResourceTypeArray;
+    resource_desc.res.array.array = surface_array;
+    CHECK_CUDA(cudaCreateSurfaceObject(&surface, &resource_desc));
+
+    const RenderTarget target_surface{
+        RenderTargetKind::INTEROP_IMAGE,
+        { 16, 16, PixelFormat::R8G8B8A8_UNORM, 1, 1 },
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(surface)),
+    };
+    const FrameId frame_surface = renderer->render(camera, params, target_surface);
+    renderer->wait(frame_surface);
+
+    std::vector<uchar4> surface_pixels(16 * 16);
+    CHECK_CUDA(cudaMemcpy2DFromArray(surface_pixels.data(),
+                                     16 * sizeof(uchar4),
+                                     surface_array,
+                                     0,
+                                     0,
+                                     16 * sizeof(uchar4),
+                                     16,
+                                     cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaDestroySurfaceObject(surface));
+    CHECK_CUDA(cudaFreeArray(surface_array));
+
+    const uchar4 surface_corner = surface_pixels[0];
+    if (surface_corner.x != 0 || surface_corner.y != 0 ||
+        surface_corner.z != 0 || surface_corner.w != 0) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer INTEROP_IMAGE did not clear background: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(surface_corner.x),
+                     static_cast<unsigned>(surface_corner.y),
+                     static_cast<unsigned>(surface_corner.z),
+                     static_cast<unsigned>(surface_corner.w));
+        return 1;
+    }
+
+    const uchar4 surface_center = surface_pixels[8 * 16 + 8];
+    if (!near_u8(surface_center.x, pixels_u8[center_u8 + 0], 2) ||
+        !near_u8(surface_center.y, pixels_u8[center_u8 + 1], 2) ||
+        !near_u8(surface_center.z, pixels_u8[center_u8 + 2], 2) ||
+        !near_u8(surface_center.w, pixels_u8[center_u8 + 3], 2)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer INTEROP_IMAGE mismatch: surface=(%u %u %u %u) host=(%u %u %u %u)\n",
+                     static_cast<unsigned>(surface_center.x),
+                     static_cast<unsigned>(surface_center.y),
+                     static_cast<unsigned>(surface_center.z),
+                     static_cast<unsigned>(surface_center.w),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 0]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 1]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 2]),
+                     static_cast<unsigned>(pixels_u8[center_u8 + 3]));
+        return 1;
+    }
+
     return 0;
 }

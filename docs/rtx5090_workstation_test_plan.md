@@ -317,11 +317,12 @@ Pass criteria:
 - `nvcc` accepts `sm_120`.
 - `test_cuda_tile_renderer` passes: the CUDA tile blend kernel consumes
   `GpuProjectedSplat`, sorted indices, and `GpuTileRange` and produces the
-  expected blended pixel.
+  expected blended pixel in both float-buffer and RGBA8 CUDA-surface outputs.
 - `test_cuda_rasterizer_smoke` passes: the public `make_renderer("cuda")`
   path runs `upload -> render -> wait` through CUDA preprocess/projection,
   fixed-capacity deterministic device tile lists, tile blending, and
-  `HOST_BUFFER` readback.
+  `HOST_BUFFER` readback, then writes the same frame through
+  `RenderTargetKind::INTEROP_IMAGE` into a CUDA surface object.
 - `test_cuda_gaussian_reconstruction` passes: the tensorized reconstruction
   path handles nvdiffrast/seed-buffer ingestion, device-side sample counts,
   tile bin/compact/resolve, gated weighted resolve, state update, and feature

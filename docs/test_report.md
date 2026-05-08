@@ -157,7 +157,7 @@ These tests are compiled only when the relevant SDK/backend is enabled. They ret
 | --- | --- | --- |
 | `test_vulkan_m7_offscreen` | Creates a Vulkan instance, finds a physical device with vkGSplat mesh-shader requirements, finds a graphics queue, and creates a logical device with mesh shader, buffer device address, and synchronization extensions. The offscreen draw target is still a gate, not a rendered image test. | None |
 | `test_cuda_tile_renderer` | With CUDA and 3DGS enabled, runs the CUDA tile renderer on a tiny projected-splat fixture, copies pixels back, and checks the center pixel is red-dominant after sorted blending. | In-memory only. |
-| `test_cuda_rasterizer_smoke` | With CUDA and 3DGS enabled, exercises the public CUDA renderer path: `make_renderer("cuda")`, scene upload, CUDA preprocess/projection, fixed-capacity deterministic device tile lists/ranges, tile blending, and `HOST_BUFFER` readback. | In-memory only. |
+| `test_cuda_rasterizer_smoke` | With CUDA and 3DGS enabled, exercises the public CUDA renderer path: `make_renderer("cuda")`, scene upload, CUDA preprocess/projection, fixed-capacity deterministic device tile lists/ranges, tile blending, `HOST_BUFFER` readback, and `INTEROP_IMAGE` CUDA-surface output. | In-memory only. |
 | `test_cuda_gaussian_reconstruction` | With CUDA and 3DGS enabled, validates the tensorized reconstruction kernels for seed-buffer ingestion, device-side sample counts, tile bin/compact/resolve, gated weighted resolve, Gaussian state update, and feature projection. | In-memory only. |
 
 ## Latest Local Result

@@ -2951,16 +2951,24 @@ The present M0R split is intentionally simple:
         scatter and depth-key sort path replaces it,
   \item alpha compositing already runs through CUDA \texttt{TileBlend}, which
         clears the output, clamps opacity, and stops once transmittance is
-        small.
+        small,
+  \item \texttt{RenderTargetKind::INTEROP\_IMAGE} is now part of the bridge:
+        the tile renderer can pack RGBA8 and write directly to a CUDA surface
+        object, including the surface object produced by a Vulkan external
+        image import. Host-buffer readback remains a test/debug path, not the
+        intended residency boundary.
 \end{itemize}
 
 This is acceptable only as a short bridge. The first pass/fail test is whether
 the CUDA tile blend matches the CPU 3DGS reference for tiny scenes after both
 are given identical projected splats and tile ranges. The second test replaces
-one host-owned stage at a time and checks that image error and tile statistics
-remain stable. The replacement order should be:
+one host-owned stage at a time and checks that image error, surface output, and
+tile statistics remain stable. The replacement order should be:
 
 \begin{enumerate}
+  \item validate that \texttt{HOST\_BUFFER} RGBA8 output and
+        \texttt{INTEROP\_IMAGE} CUDA-surface output agree on the same tiny
+        projected-splat fixture,
   \item replace the fixed-capacity tile-list kernel with device tile-count
         emission, exclusive scan, and compact scatter,
   \item add depth-key generation and either CUB radix sort or bounded tile-local
@@ -2972,7 +2980,12 @@ remain stable. The replacement order should be:
 M0R fails if the renderer builds a private tile-list ABI that the
 reconstruction kernels cannot consume. It succeeds if render, TAA, SR, and
 frame interpolation all use the same projected-splat/range contract, even while
-some construction stages are still host oracles.
+some construction stages are still host oracles. The key implementation lesson
+is that software rendering addresses the fixed-function graphics dependency
+only if its output is already device-resident; the 3DGS reconstruction stack
+addresses the DLSS boundary only if that device-resident output is immediately
+visible as Gaussian/radiance history rather than a final image copied back to
+the CPU.
 
 \subsection{M2: Same State, 2x/4x SR}
 

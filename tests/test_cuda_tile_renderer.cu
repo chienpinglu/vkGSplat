@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <vector>
 
 namespace {
@@ -26,6 +27,16 @@ namespace {
 
 bool near(float a, float b, float eps = 1.0e-5f) {
     return std::abs(a - b) <= eps;
+}
+
+bool near_u8(unsigned char a, unsigned char b, unsigned char eps = 1) {
+    const int delta = static_cast<int>(a) - static_cast<int>(b);
+    return std::abs(delta) <= static_cast<int>(eps);
+}
+
+unsigned char pack_unorm8(float v) {
+    const float clamped = std::fmin(std::fmax(v, 0.0f), 1.0f);
+    return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
 }
 
 } // namespace
@@ -80,11 +91,6 @@ int main() {
     CHECK_CUDA(cudaDeviceSynchronize());
     CHECK_CUDA(cudaMemcpy(pixels.data(), d_pixels, sizeof(vkgsplat::float4) * pixels.size(), cudaMemcpyDeviceToHost));
 
-    cudaFree(d_projected);
-    cudaFree(d_indices);
-    cudaFree(d_ranges);
-    cudaFree(d_pixels);
-
     const vkgsplat::float4 corner = pixels[0];
     if (!near(corner.x, 0.0f) || !near(corner.y, 0.0f) ||
         !near(corner.z, 0.0f) || !near(corner.w, 0.0f)) {
@@ -99,6 +105,78 @@ int main() {
                      center.x, center.y, center.z, center.w);
         return 1;
     }
+
+    cudaArray_t surface_array = nullptr;
+    cudaSurfaceObject_t surface = 0;
+    const cudaChannelFormatDesc channel_desc =
+        cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
+    CHECK_CUDA(cudaMallocArray(&surface_array,
+                               &channel_desc,
+                               launch.width,
+                               launch.height,
+                               cudaArraySurfaceLoadStore));
+
+    cudaResourceDesc resource_desc{};
+    resource_desc.resType = cudaResourceTypeArray;
+    resource_desc.res.array.array = surface_array;
+    CHECK_CUDA(cudaCreateSurfaceObject(&surface, &resource_desc));
+
+    launch_tile_renderer_surface_rgba8(
+        launch,
+        d_projected,
+        d_indices,
+        d_ranges,
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(surface)),
+        nullptr);
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    std::vector<uchar4> surface_pixels(launch.width * launch.height);
+    CHECK_CUDA(cudaMemcpy2DFromArray(surface_pixels.data(),
+                                     launch.width * sizeof(uchar4),
+                                     surface_array,
+                                     0,
+                                     0,
+                                     launch.width * sizeof(uchar4),
+                                     launch.height,
+                                     cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaDestroySurfaceObject(surface));
+    CHECK_CUDA(cudaFreeArray(surface_array));
+
+    const uchar4 surface_corner = surface_pixels[0];
+    if (surface_corner.x != 0 || surface_corner.y != 0 ||
+        surface_corner.z != 0 || surface_corner.w != 0) {
+        std::fprintf(stderr,
+                     "CUDA tile surface renderer did not clear background: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(surface_corner.x),
+                     static_cast<unsigned>(surface_corner.y),
+                     static_cast<unsigned>(surface_corner.z),
+                     static_cast<unsigned>(surface_corner.w));
+        return 1;
+    }
+
+    const uchar4 surface_center = surface_pixels[8 * launch.width + 8];
+    if (!near_u8(surface_center.x, pack_unorm8(center.x), 2) ||
+        !near_u8(surface_center.y, pack_unorm8(center.y), 2) ||
+        !near_u8(surface_center.z, pack_unorm8(center.z), 2) ||
+        !near_u8(surface_center.w, pack_unorm8(center.w), 2)) {
+        std::fprintf(stderr,
+                     "CUDA tile surface renderer mismatch: surface=(%u %u %u %u) float=(%.4f %.4f %.4f %.4f)\n",
+                     static_cast<unsigned>(surface_center.x),
+                     static_cast<unsigned>(surface_center.y),
+                     static_cast<unsigned>(surface_center.z),
+                     static_cast<unsigned>(surface_center.w),
+                     center.x,
+                     center.y,
+                     center.z,
+                     center.w);
+        return 1;
+    }
+
+    cudaFree(d_projected);
+    cudaFree(d_indices);
+    cudaFree(d_ranges);
+    cudaFree(d_pixels);
 
     return 0;
 }

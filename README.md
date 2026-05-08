@@ -128,10 +128,11 @@ On an NVIDIA CUDA workstation, use the RTX 5090 bring-up plan:
 `docs/rtx5090_workstation_test_plan.md`. The CUDA gate currently includes:
 
 - `test_cuda_tile_renderer`: validates the tile blend kernel on a tiny
-  projected-splat fixture.
+  projected-splat fixture, including direct RGBA8 CUDA surface writes.
 - `test_cuda_rasterizer_smoke`: exercises the public `make_renderer("cuda")`
   path through upload, CUDA preprocess/projection, deterministic fixed-capacity
-  device tile lists/ranges, tile blending, and host-buffer readback.
+  device tile lists/ranges, tile blending, host-buffer readback, and
+  `INTEROP_IMAGE` CUDA-surface output.
 - `test_cuda_gaussian_reconstruction`: validates the tensorized reconstruction
   kernels for nvdiffrast/seed-buffer ingestion, device-side sample counts,
   tile bin/compact/resolve, gated weighted resolve, state update, and feature

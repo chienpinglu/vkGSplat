@@ -39,7 +39,9 @@ enum class RenderTargetKind {
 struct RenderTarget {
     RenderTargetKind kind = RenderTargetKind::HOST_BUFFER;
     ImageDesc        desc{};
-    void*            user_handle = nullptr;  // VkImage or host pointer
+    // HOST_BUFFER: host pointer. INTEROP_IMAGE: backend-native imported image
+    // handle, e.g. ExternalImage::cuda_surface() for the CUDA backend.
+    void*            user_handle = nullptr;
 };
 
 class Renderer {

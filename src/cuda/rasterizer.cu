@@ -588,11 +588,12 @@ public:
             return frame_;
         }
 
-        if (target.kind != RenderTargetKind::HOST_BUFFER) {
-            throw std::runtime_error("cuda::Rasterizer: only HOST_BUFFER targets are implemented in M0");
+        if (target.kind != RenderTargetKind::HOST_BUFFER &&
+            target.kind != RenderTargetKind::INTEROP_IMAGE) {
+            throw std::runtime_error("cuda::Rasterizer: unsupported render target kind");
         }
         if (!target.user_handle) {
-            throw std::runtime_error("cuda::Rasterizer: HOST_BUFFER target requires user_handle");
+            throw std::runtime_error("cuda::Rasterizer: render target requires user_handle");
         }
 
         ImageDesc desc = target.desc;
@@ -667,10 +668,14 @@ public:
             1.0e-3f,
             TILE_RENDERER_CLEAR_OUTPUT,
         };
-        launch_tile_renderer(tile_launch, projected_dev_, sorted_indices_dev_,
-                             tile_ranges_dev_, output_dev_, stream_);
-        VKGSPLAT_CUDA_CHECK(cudaGetLastError());
-        copy_output_to_target(desc, target);
+        if (target.kind == RenderTargetKind::HOST_BUFFER) {
+            launch_tile_renderer(tile_launch, projected_dev_, sorted_indices_dev_,
+                                 tile_ranges_dev_, output_dev_, stream_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            copy_output_to_target(desc, target);
+        } else {
+            launch_surface_output(desc, tile_launch, target);
+        }
         VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_tile_overflow_count_,
                                            tile_overflow_dev_,
                                            sizeof(std::uint32_t),
@@ -762,6 +767,27 @@ private:
         default:
             throw std::runtime_error("cuda::Rasterizer: HOST_BUFFER target format is not supported");
         }
+    }
+
+    void launch_surface_output(const ImageDesc& desc,
+                               const TileRendererLaunch& tile_launch,
+                               const RenderTarget& target) {
+        if (desc.format != PixelFormat::R8G8B8A8_UNORM &&
+            desc.format != PixelFormat::R8G8B8A8_SRGB) {
+            throw std::runtime_error(
+                "cuda::Rasterizer: INTEROP_IMAGE currently requires RGBA8/SDR format");
+        }
+        if (desc.mip_levels != 1 || desc.array_layers != 1) {
+            throw std::runtime_error(
+                "cuda::Rasterizer: INTEROP_IMAGE currently supports only 2D level-0 layer-0 output");
+        }
+        launch_tile_renderer_surface_rgba8(tile_launch,
+                                           projected_dev_,
+                                           sorted_indices_dev_,
+                                           tile_ranges_dev_,
+                                           target.user_handle,
+                                           stream_);
+        VKGSPLAT_CUDA_CHECK(cudaGetLastError());
     }
 
     cudaStream_t stream_ = nullptr;
