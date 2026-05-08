@@ -5,6 +5,7 @@
 // on a tiny synthetic two-splat scene.
 
 #include <vkgsplat/vkgsplat.h>
+#include <vkgsplat/cuda/rasterizer.h>
 
 #include <cuda_runtime.h>
 
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -34,6 +36,38 @@ bool near(float a, float b, float eps = 1.0e-4f) {
 bool near_u8(std::uint8_t a, std::uint8_t b, std::uint8_t eps = 1) {
     const int delta = static_cast<int>(a) - static_cast<int>(b);
     return std::abs(delta) <= static_cast<int>(eps);
+}
+
+float half_to_float(std::uint16_t bits) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(bits & 0x8000u) << 16u;
+    const std::uint32_t exp = (bits >> 10u) & 0x1fu;
+    const std::uint32_t mant = bits & 0x03ffu;
+
+    std::uint32_t out = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            out = sign;
+        } else {
+            int shift = 0;
+            std::uint32_t normalized = mant;
+            while ((normalized & 0x0400u) == 0u) {
+                normalized <<= 1u;
+                ++shift;
+            }
+            normalized &= 0x03ffu;
+            const std::uint32_t exp32 = static_cast<std::uint32_t>(127 - 14 - shift);
+            out = sign | (exp32 << 23u) | (normalized << 13u);
+        }
+    } else if (exp == 0x1fu) {
+        out = sign | 0x7f800000u | (mant << 13u);
+    } else {
+        const std::uint32_t exp32 = exp + (127u - 15u);
+        out = sign | (exp32 << 23u) | (mant << 13u);
+    }
+
+    float value = 0.0f;
+    std::memcpy(&value, &out, sizeof(value));
+    return value;
 }
 
 vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
@@ -71,6 +105,11 @@ int main() {
         std::fprintf(stderr, "CUDA renderer factory returned null\n");
         return 1;
     }
+    auto* cuda_renderer = dynamic_cast<vkgsplat::cuda::Rasterizer*>(renderer.get());
+    if (!cuda_renderer) {
+        std::fprintf(stderr, "CUDA renderer factory returned unexpected backend type\n");
+        return 1;
+    }
 
     Scene scene;
     scene.resize(2);
@@ -106,6 +145,20 @@ int main() {
         std::fprintf(stderr,
                      "CUDA rasterizer did not clear background: corner=(%.4f %.4f %.4f %.4f)\n",
                      corner.x, corner.y, corner.z, corner.w);
+        return 1;
+    }
+
+    const auto stats = cuda_renderer->last_stats();
+    if (stats.projected_splats != 2u || stats.nonempty_tiles != 1u ||
+        stats.tile_splat_entries != 2u || stats.tile_splat_overflow != 0u ||
+        stats.max_tile_splats != 2u) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer stats mismatch: projected=%u nonempty=%u entries=%u overflow=%u max=%u\n",
+                     stats.projected_splats,
+                     stats.nonempty_tiles,
+                     stats.tile_splat_entries,
+                     stats.tile_splat_overflow,
+                     stats.max_tile_splats);
         return 1;
     }
 
@@ -158,6 +211,46 @@ int main() {
                      static_cast<unsigned>(pixels_u8[center_u8 + 3]),
                      center.w,
                      static_cast<unsigned>(expected_alpha));
+        return 1;
+    }
+
+    std::vector<std::uint16_t> pixels_f16(16 * 16 * 4, 0);
+    const RenderTarget target_f16{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R16G16B16A16_SFLOAT, 1, 1 },
+        pixels_f16.data(),
+    };
+    const FrameId frame_f16 = renderer->render(camera, params, target_f16);
+    renderer->wait(frame_f16);
+
+    if (!near(half_to_float(pixels_f16[0]), 0.0f, 1.0e-3f) ||
+        !near(half_to_float(pixels_f16[1]), 0.0f, 1.0e-3f) ||
+        !near(half_to_float(pixels_f16[2]), 0.0f, 1.0e-3f) ||
+        !near(half_to_float(pixels_f16[3]), 0.0f, 1.0e-3f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer did not pack FP16 background: corner=(%.4f %.4f %.4f %.4f)\n",
+                     half_to_float(pixels_f16[0]),
+                     half_to_float(pixels_f16[1]),
+                     half_to_float(pixels_f16[2]),
+                     half_to_float(pixels_f16[3]));
+        return 1;
+    }
+
+    const std::size_t center_f16 = (8 * 16 + 8) * 4;
+    const float4 center_half{
+        half_to_float(pixels_f16[center_f16 + 0]),
+        half_to_float(pixels_f16[center_f16 + 1]),
+        half_to_float(pixels_f16[center_f16 + 2]),
+        half_to_float(pixels_f16[center_f16 + 3]),
+    };
+    if (!near(center_half.x, center.x, 2.0e-3f) ||
+        !near(center_half.y, center.y, 2.0e-3f) ||
+        !near(center_half.z, center.z, 2.0e-3f) ||
+        !near(center_half.w, center.w, 2.0e-3f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer FP16 output mismatch: half=(%.4f %.4f %.4f %.4f) float=(%.4f %.4f %.4f %.4f)\n",
+                     center_half.x, center_half.y, center_half.z, center_half.w,
+                     center.x, center.y, center.z, center.w);
         return 1;
     }
 

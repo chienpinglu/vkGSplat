@@ -19,11 +19,20 @@
 #include "../renderer.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 namespace vkgsplat::cuda {
 
 class RasterizerImpl; // forward decl, defined in src/cuda/rasterizer.cu
+
+struct RasterizerFrameStats {
+    std::uint32_t projected_splats = 0;
+    std::uint32_t nonempty_tiles = 0;
+    std::uint32_t tile_splat_entries = 0;
+    std::uint32_t tile_splat_overflow = 0;
+    std::uint32_t max_tile_splats = 0;
+};
 
 // CUDA-resident 3DGS rasterizer implementing the Renderer interface.
 class Rasterizer final : public Renderer {
@@ -46,6 +55,8 @@ public:
     // the same physical GPU as the Vulkan device, which is required
     // for VK_KHR_external_memory imports to succeed.
     void bind_to_device_uuid(const std::array<unsigned char, 16>& uuid);
+
+    [[nodiscard]] RasterizerFrameStats last_stats() const;
 
 private:
     std::unique_ptr<RasterizerImpl> impl_;

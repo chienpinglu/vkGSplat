@@ -22,6 +22,7 @@
 #include "vkgsplat/cuda/tile_renderer.h"
 #include "vkgsplat/tile_raster.h"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -328,6 +329,7 @@ __global__ void preprocess_kernel(int num_gaussians,
                                   const Gaussian* __restrict__ gaussians,
                                   PreprocessedGaussian* __restrict__ out,
                                   GpuProjectedSplat* __restrict__ projected,
+                                  RasterizerFrameStats* __restrict__ stats,
                                   DeviceMat4 view_matrix,
                                   DeviceMat4 projection_matrix,
                                   int image_w,
@@ -443,6 +445,9 @@ __global__ void preprocess_kernel(int num_gaussians,
     q.opacity = p.alpha;
     q.color = p.color;
     q.splat_index = splat_index;
+    if (stats) {
+        atomicAdd(&stats->projected_splats, 1u);
+    }
     out[index] = p;
     projected[index] = q;
 }
@@ -452,7 +457,7 @@ __global__ void build_fixed_tile_lists_kernel(int num_gaussians,
                                               const GpuProjectedSplat* __restrict__ projected,
                                               std::uint32_t* __restrict__ sorted_projected_indices,
                                               GpuTileRange* __restrict__ tile_ranges,
-                                              std::uint32_t* __restrict__ overflow_counter,
+                                              RasterizerFrameStats* __restrict__ stats,
                                               int tiles_x,
                                               int tiles_y,
                                               int max_splats_per_tile) {
@@ -472,8 +477,8 @@ __global__ void build_fixed_tile_lists_kernel(int num_gaussians,
             continue;
         }
         if (count >= static_cast<std::uint32_t>(max_splats_per_tile)) {
-            if (overflow_counter) {
-                atomicAdd(overflow_counter, 1u);
+            if (stats) {
+                atomicAdd(&stats->tile_splat_overflow, 1u);
             }
             continue;
         }
@@ -492,6 +497,13 @@ __global__ void build_fixed_tile_lists_kernel(int num_gaussians,
     }
 
     tile_ranges[tile] = { offset, count };
+    if (stats) {
+        if (count > 0u) {
+            atomicAdd(&stats->nonempty_tiles, 1u);
+        }
+        atomicAdd(&stats->tile_splat_entries, count);
+        atomicMax(&stats->max_tile_splats, count);
+    }
 }
 
 __device__ unsigned char to_unorm8_device(float v) {
@@ -513,6 +525,20 @@ __global__ void pack_rgba8_kernel(std::size_t pixel_count,
     dst[index * 4u + 3u] = to_unorm8_device(c.w);
 }
 
+__global__ void pack_rgba16f_kernel(std::size_t pixel_count,
+                                    const float4* __restrict__ src,
+                                    unsigned short* __restrict__ dst) {
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= pixel_count) return;
+
+    const float4 c = src[index];
+    dst[index * 4u + 0u] = __half_as_ushort(__float2half_rn(c.x));
+    dst[index * 4u + 1u] = __half_as_ushort(__float2half_rn(c.y));
+    dst[index * 4u + 2u] = __half_as_ushort(__float2half_rn(c.z));
+    dst[index * 4u + 3u] = __half_as_ushort(__float2half_rn(c.w));
+}
+
 // ---------------------------------------------------------------------
 // RasterizerImpl — opaque device state for the public Rasterizer class
 // ---------------------------------------------------------------------
@@ -529,9 +555,10 @@ public:
         if (projected_dev_) cudaFree(projected_dev_);
         if (sorted_indices_dev_) cudaFree(sorted_indices_dev_);
         if (tile_ranges_dev_) cudaFree(tile_ranges_dev_);
-        if (tile_overflow_dev_) cudaFree(tile_overflow_dev_);
+        if (stats_dev_) cudaFree(stats_dev_);
         if (output_dev_) cudaFree(output_dev_);
         if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
+        if (output_rgba16_dev_) cudaFree(output_rgba16_dev_);
         if (stream_) cudaStreamDestroy(stream_);
     }
 
@@ -583,6 +610,7 @@ public:
         ++frame_;
 
         if (gaussian_count_ == 0) {
+            last_frame_stats_ = {};
             // Empty scene: nothing to do, but advance the timeline so
             // wait() callers do not deadlock.
             return frame_;
@@ -625,7 +653,8 @@ public:
                                fixed_index_capacity,
                                tile_count,
                                static_cast<std::size_t>(desc.width) * desc.height);
-        VKGSPLAT_CUDA_CHECK(cudaMemsetAsync(tile_overflow_dev_, 0, sizeof(std::uint32_t), stream_));
+        last_frame_stats_ = {};
+        VKGSPLAT_CUDA_CHECK(cudaMemsetAsync(stats_dev_, 0, sizeof(RasterizerFrameStats), stream_));
 
         const int threads = 256;
         const int blocks  = (static_cast<int>(gaussian_count_) + threads - 1) / threads;
@@ -637,6 +666,7 @@ public:
             reinterpret_cast<const Gaussian*>(gaussians_dev_),
             preprocessed_dev_,
             projected_dev_,
+            stats_dev_,
             view_dev,
             projection_dev,
             static_cast<int>(desc.width),
@@ -652,7 +682,7 @@ public:
             projected_dev_,
             sorted_indices_dev_,
             tile_ranges_dev_,
-            tile_overflow_dev_,
+            stats_dev_,
             static_cast<int>(grid.tiles_x),
             static_cast<int>(grid.tiles_y),
             tunables_.max_splats_per_tile);
@@ -676,9 +706,9 @@ public:
         } else {
             launch_surface_output(desc, tile_launch, target);
         }
-        VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_tile_overflow_count_,
-                                           tile_overflow_dev_,
-                                           sizeof(std::uint32_t),
+        VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_frame_stats_,
+                                           stats_dev_,
+                                           sizeof(RasterizerFrameStats),
                                            cudaMemcpyDeviceToHost,
                                            stream_));
 
@@ -687,14 +717,16 @@ public:
 
     void wait(FrameId /*frame*/) {
         VKGSPLAT_CUDA_CHECK(cudaStreamSynchronize(stream_));
-        if (last_tile_overflow_count_ > 0 && !reported_tile_overflow_) {
+        if (last_frame_stats_.tile_splat_overflow > 0 && !reported_tile_overflow_) {
             std::fprintf(stderr,
                          "[vkgsplat][cuda] fixed tile-list dropped %u tile/splat entries; "
                          "increase max_splats_per_tile or replace M0 binning with count/scan/scatter\n",
-                         last_tile_overflow_count_);
+                         last_frame_stats_.tile_splat_overflow);
             reported_tile_overflow_ = true;
         }
     }
+
+    [[nodiscard]] RasterizerFrameStats last_stats() const { return last_frame_stats_; }
 
 private:
     void ensure_device_capacity(std::size_t projected_count,
@@ -719,8 +751,8 @@ private:
                                           sizeof(GpuTileRange) * tile_count));
             tile_range_capacity_ = tile_count;
         }
-        if (!tile_overflow_dev_) {
-            VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_overflow_dev_, sizeof(std::uint32_t)));
+        if (!stats_dev_) {
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&stats_dev_, sizeof(RasterizerFrameStats)));
         }
         if (pixel_count > output_capacity_) {
             if (output_dev_) cudaFree(output_dev_);
@@ -735,6 +767,15 @@ private:
             if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&output_rgba8_dev_, bytes));
             output_rgba8_capacity_bytes_ = bytes;
+        }
+    }
+
+    void ensure_rgba16_capacity(std::size_t pixel_count) {
+        const std::size_t bytes = pixel_count * 4u * sizeof(std::uint16_t);
+        if (bytes > output_rgba16_capacity_bytes_) {
+            if (output_rgba16_dev_) cudaFree(output_rgba16_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&output_rgba16_dev_, bytes));
+            output_rgba16_capacity_bytes_ = bytes;
         }
     }
 
@@ -760,6 +801,20 @@ private:
             VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(target.user_handle,
                                                 output_rgba8_dev_,
                                                 pixel_count * 4u,
+                                                cudaMemcpyDeviceToHost,
+                                                stream_));
+            break;
+        }
+        case PixelFormat::R16G16B16A16_SFLOAT: {
+            ensure_rgba16_capacity(pixel_count);
+            constexpr int threads = 256;
+            const int blocks = static_cast<int>((pixel_count + threads - 1u) / threads);
+            pack_rgba16f_kernel<<<blocks, threads, 0, stream_>>>(
+                pixel_count, output_dev_, static_cast<unsigned short*>(output_rgba16_dev_));
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(target.user_handle,
+                                                output_rgba16_dev_,
+                                                pixel_count * 4u * sizeof(std::uint16_t),
                                                 cudaMemcpyDeviceToHost,
                                                 stream_));
             break;
@@ -799,15 +854,17 @@ private:
     GpuProjectedSplat*    projected_dev_       = nullptr;
     std::uint32_t*        sorted_indices_dev_  = nullptr;
     GpuTileRange*         tile_ranges_dev_     = nullptr;
-    std::uint32_t*        tile_overflow_dev_   = nullptr;
+    RasterizerFrameStats*  stats_dev_           = nullptr;
     float4*               output_dev_          = nullptr;
     void*                 output_rgba8_dev_    = nullptr;
+    void*                 output_rgba16_dev_   = nullptr;
     std::size_t           projected_capacity_  = 0;
     std::size_t           sorted_index_capacity_ = 0;
     std::size_t           tile_range_capacity_ = 0;
     std::size_t           output_capacity_     = 0;
     std::size_t           output_rgba8_capacity_bytes_ = 0;
-    std::uint32_t         last_tile_overflow_count_ = 0;
+    std::size_t           output_rgba16_capacity_bytes_ = 0;
+    RasterizerFrameStats   last_frame_stats_{};
     bool                  reported_tile_overflow_ = false;
 
     RasterizerTunables tunables_{};
@@ -832,6 +889,8 @@ FrameId Rasterizer::render(const Camera& camera,
 }
 
 void Rasterizer::wait(FrameId frame) { impl_->wait(frame); }
+
+RasterizerFrameStats Rasterizer::last_stats() const { return impl_->last_stats(); }
 
 void Rasterizer::bind_to_device_uuid(const std::array<unsigned char, 16>& uuid) {
     impl_->bind_to_uuid(uuid);

@@ -67,6 +67,12 @@ new acquisitions, and the resulting synthetic data revises the next model.
 This framing explains several otherwise separate trends. DLSS-class rendering
 already treats rasterization and ray tracing as sparse acquisition followed by
 tensor-side reconstruction~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,nvidia-dlss35rr}.
+However, DLSS is compute-heavy in implementation but proprietary and
+graphics-stack-packaged in deployment. vkGSplat therefore treats integrated
+3DGS/radiance state as the open DLSS-class replacement layer for SDG: a
+device-resident reconstruction memory that consumes sparse seeds and serves
+denoising, temporal reuse, super-resolution, frame interpolation, and
+confidence-gated oracle refresh.
 Robotics SDG is throughput-bound and latency-tolerant, so it can trade
 fixed-function graphics latency for compute portability. More importantly, SDG
 has an amortized world-building phase that games do not: it can spend seconds,
@@ -77,6 +83,10 @@ such as Genie and Cosmos are compatible with, rather than replacements for,
 calibrated physics and sensors when they act as priors, rollout generators, or
 proposal mechanisms~\cite{ha2018,bruce2024,deepmind2024genie2,nvidia2024cosmos}.
 We use \textbf{vkGSplat} as the reference implementation of this philosophy. The
+name is intentional: \textbf{vk} means the system preserves Vulkan as the
+application contract while supporting a CUDA software execution path, and
+\textbf{GSplat} means 3D Gaussian Splatting becomes the open reconstruction
+layer that replaces the architectural role of proprietary DLSS for SDG. The
 architecture is acquisition-backend neutral: a conventional Vulkan renderer on
 graphics hardware is a valid and often best acquisition oracle. vkGSplat adds a
 compute-first Vulkan path that preserves the API as a portable application
@@ -96,8 +106,8 @@ on dollars per image}, while preserving downstream sim-to-real task accuracy.
 
 \begin{IEEEkeywords}
 Physical AI, synthetic data generation, world models, acquisition and
-reconstruction, Vulkan, software rendering, 3D Gaussian splatting, robotics, AI
-accelerators.
+reconstruction, DLSS-class reconstruction, Vulkan, software rendering, 3D
+Gaussian splatting, robotics, AI accelerators.
 \end{IEEEkeywords}
 
 % =====================================================================
@@ -160,6 +170,16 @@ physical. It is that low-sample acquisition can remain grounded in the correct
 transport process while reconstruction amortizes the cost. Lowering samples per
 pixel preserves the target integral in expectation; lowering bounce depth
 changes the physical model and must be tracked as bias.
+
+This distinction is central to vkGSplat. DLSS is fundamentally a compute
+reconstruction pipeline --- it runs on tensor hardware and consumes motion,
+depth, exposure, and history --- but it is packaged as a proprietary graphics
+feature inside the RTX/game-rendering stack. That packaging is rational for
+games, yet it is the wrong boundary for AIDC-native synthetic data generation.
+vkGSplat keeps the useful architectural lesson and changes the substrate:
+integrated 3DGS/radiance state replaces the role of DLSS as the reconstruction
+layer, while remaining open, scene-aware, persistent across views, and directly
+connected to CUDA/PyTorch training workflows.
 
 World-model research fits the same loop when its role is stated carefully.
 Classical world models learn compact predictive dynamics for control
@@ -256,11 +276,15 @@ architecture. It preserves Vulkan as an application boundary, treats hardware
 Vulkan output as a first-class acquisition source, and adds a CUDA software path
 for seed generation and reconstruction when the pipeline benefits from AI-compute
 co-location. It also explores persistent 3D/4D Gaussian state as an explicit
-memory for physical evidence. The paper therefore has two layers. The first is
-the philosophy: Physical AI data generation should combine calibrated
-acquisition, explicit state, learned reconstruction, and uncertainty-gated oracle
-refresh. The second is the system: vkGSplat tests whether this philosophy can be
-implemented as a compute-first Vulkan path on AI accelerators.
+memory for physical evidence. The name carries the system boundary: \emph{vk}
+denotes Vulkan compatibility through a CUDA software path, while \emph{GSplat}
+denotes 3D Gaussian Splatting as the open DLSS-class integration layer for
+denoising, temporal reuse, super-resolution, frame interpolation, and radiance
+state. The paper therefore has two layers. The first is the philosophy:
+Physical AI data generation should combine calibrated acquisition, explicit
+state, learned reconstruction, and uncertainty-gated oracle refresh. The second
+is the system: vkGSplat tests whether this philosophy can be implemented as a
+compute-first Vulkan path on AI accelerators.
 
 \textbf{Relation to the Gaussian reconstruction note.} This paper defines the
 world-modeling and compute-first SDG system boundary: physical acquisition,
@@ -275,7 +299,7 @@ representation; the companion note works out the Gaussian-state math and CUDA
 experiments.
 
 \textbf{Contributions.} This is a position paper about Physical AI data
-generation, with \textbf{vkGSplat} as the reference system. We make nine claims:
+generation, with \textbf{vkGSplat} as the reference system. We make ten claims:
 
 \begin{enumerate}
     \item \textbf{World-modeling philosophy.} Physical AI data generation
@@ -297,9 +321,22 @@ generation, with \textbf{vkGSplat} as the reference system. We make nine claims:
     persistent 3D/4D Gaussian, radiance-cache, and world-state address spaces
     (Section~\ref{sec:acqrec}).
 
-    \item \textbf{Allocation law.} The modernized Amdahl argument says
-    that fixed-function specialization faces a finite collapse threshold
-    when the value-scalable fraction of a workload grows. Bounded
+    \item \textbf{3DGS as the open DLSS-class integration layer.}
+    DLSS is compute reconstruction packaged as a proprietary graphics-stack
+    feature. vkGSplat replaces that architectural role, not by cloning DLSS,
+    but by using integrated 3DGS/radiance state as an open, persistent,
+    scene-aware reconstruction layer for denoising, TAA, super-resolution,
+    frame interpolation, radiance-cache reuse, and confidence-gated oracle
+    refresh (Section~\ref{sec:dlss}).
+
+    \item \textbf{Allocation law.} The modernized Amdahl argument uses the
+    allocation objective
+    $T(R,s,x)=(1-s)/(1+(R-1)x)+s/(1-x)$, where $x$ is the budget assigned to
+    specialized graphics logic, $R$ is its bounded-stage efficiency advantage,
+    and $s$ is the value-scalable share. It implies that fixed-function
+    specialization is justified only when $R>R_c(s)=1/(1-s)$. As DLSS-like
+    reconstruction, integrated 3DGS state, world models, and training push $s$
+    toward one, the required fixed-function advantage diverges. Bounded
     visibility becomes acquisition, while reconstruction, prediction, and
     world-model inference remain scalable stages that should stay on
     programmable compute (Section~\ref{sec:amdahl-main} and
@@ -332,8 +369,11 @@ generation, with \textbf{vkGSplat} as the reference system. We make nine claims:
     \item \textbf{Reference implementation.} vkGSplat preserves Vulkan as the
     application contract, accepts hardware Vulkan as a valid acquisition path,
     and adds a compute-first software acquisition and reconstruction backend.
-    The point is not merely software rendering, but an explicit bridge between
-    physical evidence, Gaussian state, and tensor-side reconstruction
+    Its name summarizes the bet: \emph{vk} is Vulkan preserved through CUDA
+    software execution, and \emph{GSplat} is 3DGS replacing DLSS's architectural
+    role as an open reconstruction layer. The point is not merely software
+    rendering, but an explicit bridge between physical evidence, Gaussian
+    state, and tensor-side reconstruction
     (Section~\ref{sec:design}).
 
     \item \textbf{Ray-tracing seed path before 3DGS.}
@@ -806,8 +846,8 @@ seed-buffer contract, but implement acquisition and reconstruction as
 tile-friendly compute when AI-hardware co-location and programmability dominate
 the cost model.
 
-\subsection{The DLSS precedent: tensor compute is already where the
-rendering value lives}
+\subsection{The DLSS precedent, and why vkGSplat replaces its role with
+integrated 3DGS}
 \label{sec:dlss}
 
 The strongest evidence that graphics workloads can move off
@@ -818,6 +858,11 @@ sub-native resolution color, depth, motion, and temporally jittered
 samples. Neural reconstruction then performs super-resolution,
 anti-aliasing, denoising, and, in DLSS~3, frame
 generation~\cite{nvidia-dlss,liu2020nsrr,edelsten2019dlss,nvidia-dlss3}.
+In other words, DLSS is not primarily a rasterizer or RT-core story. It is a
+compute reconstruction story that has been productized as part of the graphics
+stack. vkGSplat's claim is that SDG needs that same reconstruction role, but
+with an open, explicit, device-resident 3DGS/radiance state instead of a closed
+image-space model packaged with graphics hardware.
 Ray-traced global illumination follows the same pattern:
 single-sample-per-pixel or low-sample path tracing produces sparse
 radiance, then spatiotemporal filters and denoisers reconstruct the
@@ -854,19 +899,25 @@ when those statistics say that a region has never observed the relevant path
 class, the system should request more oracle samples instead of silently
 hallucinating realism.
 
-vkGSplat does not need to clone DLSS. DLSS is the precedent that proves
-the rendering value has already moved toward compute-side
-reconstruction. The vkGSplat question is narrower and more actionable:
-if the seed is already sparse, noisy, and reconstructed anyway, can a
-software renderer produce that seed on AI compute cheaply enough for
-SDG? Published software rasterization~\cite{laine2011software}, GPU ray
-traversal~\cite{aila2009understanding}, neural supersampling
-~\cite{xiao2020}, and compute-native 3DGS~\cite{kerbl20233dgs} make the
-answer plausible. vkGSplat is the engineering experiment that turns that
-plausibility into a Vulkan-compatible stack.
+vkGSplat does not need to clone DLSS; it needs to replace DLSS's architectural
+role for SDG. DLSS proves that the valuable part of modern rendering has moved
+toward compute-side reconstruction, but DLSS itself is closed, display-oriented,
+and coupled to a product stack optimized for games. vkGSplat's replacement is
+integrated 3DGS: persistent Gaussian/radiance state that stores geometry,
+radiance, motion, confidence, variance, and validity epochs, then serves
+denoising, TAA, super-resolution, frame interpolation, radiance-cache reuse, and
+optional learned residuals. The vkGSplat question is therefore narrower and
+more actionable: if the seed is already sparse, noisy, and reconstructed anyway,
+can software rendering produce that seed on AI compute cheaply enough, and can
+integrated 3DGS reconstruct it well enough, for SDG? Published software
+rasterization~\cite{laine2011software}, GPU ray traversal
+~\cite{aila2009understanding}, neural supersampling~\cite{xiao2020}, and
+compute-native 3DGS~\cite{kerbl20233dgs} make the answer plausible. vkGSplat is
+the engineering experiment that turns that plausibility into a
+Vulkan-compatible stack.
 
 % =====================================================================
-\section{Modernized Amdahl view of the split}
+\section{Modernized Amdahl's Law: why SDG moves value to compute}
 \label{sec:amdahl-main}
 % =====================================================================
 
@@ -882,30 +933,56 @@ the workload.  As more of the delivered value moves into stages that
 keep improving with model capacity, inference compute, temporal history,
 and software updates, the efficiency bar for narrow specialization rises.
 
-The slide-level equation is the following. Let $x$ be the fraction of
-the hardware or cluster budget assigned to specialized graphics logic,
-$R$ its relative efficiency advantage on the bounded acquisition share,
-and $S$ the value-scalable share whose utility keeps improving on
-programmable compute:
+\noindent\textbf{Main result: Modernized Amdahl's Law for vkGSplat.}
+The decision is not whether fixed-function graphics can accelerate one bounded
+stage. The decision is whether that bounded acquisition share is large enough
+to justify a separate graphics allocation once reconstruction, world modeling,
+and training become the value-scalable share. Let $x$ be the fraction of the
+hardware or cluster budget assigned to specialized graphics logic, let $R$ be
+the relative efficiency advantage of that logic on the bounded acquisition
+share, and let $s$ be the value-scalable share whose utility keeps improving on
+programmable compute. The central allocation objective is
+\begin{equation}
+\boxed{
+  T(R,s,x)=
+  \frac{1-s}{1+(R-1)x} + \frac{s}{1-x}
+}
+\label{eq:main-modern-amdahl-objective}
+\end{equation}
+where lower $T$ means lower normalized cost per useful SDG sample. In
+plain-text form for downstream summarizers, the objective name is
+\mbox{\texttt{T(R, s, x)}} and the equation reads
+\texttt{T = (1-s)/(1+(R-1)x) + s/(1-x)}. The fixed-function allocation is
+justified only if
+\begin{equation}
+\boxed{
+  R > R_c(s)=\frac{1}{1-s}
+}
+\label{eq:main-amdahl-decision-rule}
+\end{equation}
+which means the required efficiency advantage diverges as $s\rightarrow 1$.
+This is the modernized Amdahl's Law argument for vkGSplat: once DLSS-like
+reconstruction, integrated 3DGS state, world models, and training dominate the
+useful value of SDG, programmable AI compute becomes the natural substrate.
+
+The same objective also gives the critical scalable fraction for a fixed
+specialized efficiency ratio:
 \begin{equation}
 \boxed{
 \begin{aligned}
-  \mathcal{T}(x;S,R)
-  &= \frac{1-S}{1+(R-1)x} + \frac{S}{1-x},\\
-  R_c(S) &= \frac{1}{1-S}
-  \quad\Longleftrightarrow\quad
-  S_c(R)=1-\frac{1}{R}.
+  R_c(s) &= \frac{1}{1-s},\\
+  s_c(R) &= 1-\frac{1}{R}.
 \end{aligned}}
 \label{eq:main-modern-amdahl}
 \end{equation}
-Here $\mathcal{T}$ is a normalized cost proxy for producing one useful SDG
-sample; lower is better. It is not meant to predict a single frame time. It is a
-first-order allocation model that ignores second-order effects such as
+The objective $T(R,s,x)$ is not meant to predict a single frame time. It is a
+first-order allocation model for hardware and cluster budgets that ignores
+second-order effects such as
 interconnect topology, utilization policy, and data movement except insofar as
-they change the effective $R$ or the measured scalable share $S$. In vkGSplat,
-$S$ should be estimated empirically by ablating acquisition, reconstruction,
+they change the effective $R$ or the measured scalable share $s$. In vkGSplat,
+$s$ should be estimated empirically by ablating acquisition, reconstruction,
 training, and world-model stages on a fixed workload. The interpretation is
-deliberately sharp: as reconstruction and learned world modeling push $S$ toward
+deliberately sharp: as reconstruction and learned world modeling push $s$ toward
 one, the efficiency ratio required to justify a separate fixed-function
 allocation diverges. This is the modernized Amdahl argument for making SDG a
 compute-first AI datacenter workload rather than a separate graphics-cluster
@@ -2140,50 +2217,53 @@ programmable compute when the workload itself is moving?
 
 Let $x \in [0,1)$ be the resource fraction allocated to specialized
 logic, let $R>1$ be the relative efficiency advantage of that specialized
-logic on the bounded part of the workload, and let $S \in [0,1]$ be the
+logic on the bounded part of the workload, and let $s \in [0,1]$ be the
 value-scalable fraction: the share for which additional effective
 compute continues to improve quality, capability, or utility over the
 design interval.  The first-order allocation objective is
 \begin{equation}
-  T(x) =
-  \frac{1-S}{1+(R-1)x} + \frac{S}{1-x}.
+  T(R,s,x) =
+  \frac{1-s}{1+(R-1)x} + \frac{s}{1-x}.
   \label{eq:appendix-allocation}
 \end{equation}
+In plain text, the modernized Amdahl objective is T(R, s, x) =
+(1-s)/(1+(R-1)x) + s/(1-x).
 The first term is the bounded share helped by specialization; the second
 is the scalable share left on programmable compute.  Differentiating,
 \begin{equation}
-  T'(x)
+  \frac{\partial T}{\partial x}
   =
-  -\frac{(1-S)(R-1)}{\left(1+(R-1)x\right)^2}
-  + \frac{S}{(1-x)^2}.
+  -\frac{(1-s)(R-1)}{\left(1+(R-1)x\right)^2}
+  + \frac{s}{(1-x)^2}.
   \label{eq:appendix-derivative}
 \end{equation}
-The objective is strictly convex on $[0,1)$, so the sign of $T'(0)$
+The objective is strictly convex on $[0,1)$, so the sign of
+$\partial T/\partial x$ at $x=0$
 determines whether the optimum is interior or collapses to the boundary:
 \begin{equation}
-  T'(0) < 0
+  \left.\frac{\partial T}{\partial x}\right|_{x=0} < 0
   \quad\Longleftrightarrow\quad
-  S < 1 - \frac{1}{R}.
+  s < 1 - \frac{1}{R}.
   \label{eq:appendix-threshold}
 \end{equation}
 Thus, for a fixed specialized efficiency ratio $R$, specialization
 collapses when
 \begin{equation}
-  S_c = 1 - \frac{1}{R}.
+  s_c = 1 - \frac{1}{R}.
   \label{eq:appendix-sc}
 \end{equation}
-Equivalently, for a fixed scalable fraction $S$, the minimum efficiency
+Equivalently, for a fixed scalable fraction $s$, the minimum efficiency
 ratio needed to justify specialization is
 \begin{equation}
-  R_c = \frac{1}{1-S}.
+  R_c = \frac{1}{1-s}.
   \label{eq:appendix-rc}
 \end{equation}
-In the interior regime, solving $T'(x)=0$ yields
+In the interior regime, solving $\partial T/\partial x=0$ yields
 \begin{equation}
   x^*
   =
-  \frac{\sqrt{\dfrac{(1-S)(R-1)}{S}} - 1}
-       {\sqrt{\dfrac{(1-S)(R-1)}{S}} + (R-1)}.
+  \frac{\sqrt{\dfrac{(1-s)(R-1)}{s}} - 1}
+       {\sqrt{\dfrac{(1-s)(R-1)}{s}} + (R-1)}.
   \label{eq:appendix-optimum}
 \end{equation}
 
@@ -2197,7 +2277,7 @@ In the interior regime, solving $T'(x)=0$ yields
   ymin=1, ymax=30,
   domain=0:0.966,
   samples=300,
-  xlabel={$S$ (value-scalable fraction)},
+  xlabel={$s$ (value-scalable fraction)},
   ylabel={$R$ (efficiency ratio)},
   grid=both,
   grid style={draw=black!10},
@@ -2208,7 +2288,7 @@ In the interior regime, solving $T'(x)=0$ yields
   legend pos=north west,
 ]
 \addplot[color=plotcyan, very thick] {1/(1-x)};
-\addlegendentry{$R_c = 1/(1-S)$}
+\addlegendentry{$R_c = 1/(1-s)$}
 \draw[dashed, black!70] (axis cs:0.9,1) -- (axis cs:0.9,10);
 \draw[dashed, black!70] (axis cs:0,10) -- (axis cs:0.9,10);
 \node[anchor=west, font=\scriptsize, align=left] at (axis cs:0.12,21)
@@ -2216,12 +2296,12 @@ In the interior regime, solving $T'(x)=0$ yields
 \node[anchor=west, font=\scriptsize, align=left] at (axis cs:0.53,4.2)
   {collapse\\$x^*=0$};
 \node[anchor=east, font=\scriptsize] at (axis cs:0.89,10.8)
-  {$S_c=0.9$ for $R=10$};
+  {$s_c=0.9$ for $R=10$};
 \end{axis}
 \end{tikzpicture}
 \caption{Modernized Amdahl threshold.  As the value-scalable fraction
-$S$ rises, the relative efficiency ratio required for a nonzero
-specialized allocation rises as $R_c=1/(1-S)$.  This is the mathematical
+$s$ rises, the relative efficiency ratio required for a nonzero
+specialized allocation rises as $R_c=1/(1-s)$.  This is the mathematical
 reason vkGSplat treats fixed-function visibility as bounded acquisition
 and keeps reconstruction on programmable compute.}
 \label{fig:appendix-amdahl-threshold}
@@ -2232,7 +2312,7 @@ and low-sample ray kernels may lose constant factors against dedicated
 graphics hardware, but those stages are bounded once they have produced
 the seed buffers.  Reconstruction is the value-scalable side: temporal
 reuse, denoising, super-resolution, neural fields, and model-driven scene
-synthesis can keep absorbing additional effective compute.  As $S$ rises,
+synthesis can keep absorbing additional effective compute.  As $s$ rises,
 the threshold in Fig.~\ref{fig:appendix-amdahl-threshold} says that a
 fixed-function graphics block must clear an increasingly high efficiency
 bar to justify owning a large fraction of the system.
@@ -2247,7 +2327,7 @@ with an effective ratio
   \label{eq:appendix-reff}
 \end{equation}
 deforms the interior optimum toward smaller $x$, while the first-order
-threshold at the origin remains governed by $S_c=1-1/R_{\max}$.  Memory
+threshold at the origin remains governed by $s_c=1-1/R_{\max}$.  Memory
 pressure therefore reinforces the preference for a broad programmable
 substrate in the SDG regime.
 
