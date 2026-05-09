@@ -511,6 +511,32 @@ __device__ unsigned char to_unorm8_device(float v) {
     return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
 }
 
+__global__ void clear_rgba32f_kernel(std::size_t pixel_count,
+                                     float4 color,
+                                     float4* __restrict__ dst) {
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= pixel_count) return;
+    dst[index] = color;
+}
+
+__global__ void clear_surface_rgba8_kernel(std::uint32_t width,
+                                           std::uint32_t height,
+                                           float4 color,
+                                           cudaSurfaceObject_t surface) {
+    const std::uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    const uchar4 packed{
+        to_unorm8_device(color.x),
+        to_unorm8_device(color.y),
+        to_unorm8_device(color.z),
+        to_unorm8_device(color.w),
+    };
+    surf2Dwrite(packed, surface, x * sizeof(uchar4), y);
+}
+
 __global__ void pack_rgba8_kernel(std::size_t pixel_count,
                                   const float4* __restrict__ src,
                                   unsigned char* __restrict__ dst) {
@@ -537,6 +563,36 @@ __global__ void pack_rgba16f_kernel(std::size_t pixel_count,
     dst[index * 4u + 1u] = __half_as_ushort(__float2half_rn(c.y));
     dst[index * 4u + 2u] = __half_as_ushort(__float2half_rn(c.z));
     dst[index * 4u + 3u] = __half_as_ushort(__float2half_rn(c.w));
+}
+
+__global__ void unpack_rgba8_kernel(std::size_t pixel_count,
+                                    const unsigned char* __restrict__ src,
+                                    float4* __restrict__ dst) {
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= pixel_count) return;
+
+    dst[index] = {
+        static_cast<float>(src[index * 4u + 0u]) / 255.0f,
+        static_cast<float>(src[index * 4u + 1u]) / 255.0f,
+        static_cast<float>(src[index * 4u + 2u]) / 255.0f,
+        static_cast<float>(src[index * 4u + 3u]) / 255.0f,
+    };
+}
+
+__global__ void unpack_rgba16f_kernel(std::size_t pixel_count,
+                                      const unsigned short* __restrict__ src,
+                                      float4* __restrict__ dst) {
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= pixel_count) return;
+
+    dst[index] = {
+        __half2float(__ushort_as_half(src[index * 4u + 0u])),
+        __half2float(__ushort_as_half(src[index * 4u + 1u])),
+        __half2float(__ushort_as_half(src[index * 4u + 2u])),
+        __half2float(__ushort_as_half(src[index * 4u + 3u])),
+    };
 }
 
 // ---------------------------------------------------------------------
@@ -609,13 +665,6 @@ public:
                    const RenderTarget& target) {
         ++frame_;
 
-        if (gaussian_count_ == 0) {
-            last_frame_stats_ = {};
-            // Empty scene: nothing to do, but advance the timeline so
-            // wait() callers do not deadlock.
-            return frame_;
-        }
-
         if (target.kind != RenderTargetKind::HOST_BUFFER &&
             target.kind != RenderTargetKind::INTEROP_IMAGE) {
             throw std::runtime_error("cuda::Rasterizer: unsupported render target kind");
@@ -630,6 +679,13 @@ public:
         if (desc.width == 0 || desc.height == 0) {
             throw std::runtime_error("cuda::Rasterizer: target dimensions must be nonzero");
         }
+
+        if (gaussian_count_ == 0) {
+            last_frame_stats_ = {};
+            clear_empty_target(desc, params, target);
+            return frame_;
+        }
+
         if (tunables_.tile_size <= 0) {
             throw std::runtime_error("cuda::Rasterizer: tile_size must be positive");
         }
@@ -696,14 +752,21 @@ public:
             grid.tiles_y,
             { params.background.x, params.background.y, params.background.z, 0.0f },
             1.0e-3f,
-            TILE_RENDERER_CLEAR_OUTPUT,
+            params.clear_to_background ? TILE_RENDERER_CLEAR_OUTPUT : 0u,
         };
         if (target.kind == RenderTargetKind::HOST_BUFFER) {
+            if (!params.clear_to_background) {
+                prime_output_from_target(desc, target);
+            }
             launch_tile_renderer(tile_launch, projected_dev_, sorted_indices_dev_,
                                  tile_ranges_dev_, output_dev_, stream_);
             VKGSPLAT_CUDA_CHECK(cudaGetLastError());
             copy_output_to_target(desc, target);
         } else {
+            if (!params.clear_to_background) {
+                throw std::runtime_error(
+                    "cuda::Rasterizer: INTEROP_IMAGE preserve mode requires a surface-read path");
+            }
             launch_surface_output(desc, tile_launch, target);
         }
         VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_frame_stats_,
@@ -754,6 +817,10 @@ private:
         if (!stats_dev_) {
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&stats_dev_, sizeof(RasterizerFrameStats)));
         }
+        ensure_output_capacity(pixel_count);
+    }
+
+    void ensure_output_capacity(std::size_t pixel_count) {
         if (pixel_count > output_capacity_) {
             if (output_dev_) cudaFree(output_dev_);
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&output_dev_, sizeof(float4) * pixel_count));
@@ -777,6 +844,100 @@ private:
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&output_rgba16_dev_, bytes));
             output_rgba16_capacity_bytes_ = bytes;
         }
+    }
+
+    void prime_output_from_target(const ImageDesc& desc, const RenderTarget& target) {
+        const std::size_t pixel_count = static_cast<std::size_t>(desc.width) * desc.height;
+        ensure_output_capacity(pixel_count);
+
+        switch (target.desc.format) {
+        case PixelFormat::R32G32B32A32_SFLOAT:
+        case PixelFormat::UNDEFINED:
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(output_dev_,
+                                                target.user_handle,
+                                                sizeof(float4) * pixel_count,
+                                                cudaMemcpyHostToDevice,
+                                                stream_));
+            break;
+        case PixelFormat::R8G8B8A8_UNORM:
+        case PixelFormat::R8G8B8A8_SRGB: {
+            ensure_rgba8_capacity(pixel_count);
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(output_rgba8_dev_,
+                                                target.user_handle,
+                                                pixel_count * 4u,
+                                                cudaMemcpyHostToDevice,
+                                                stream_));
+            constexpr int threads = 256;
+            const int blocks = static_cast<int>((pixel_count + threads - 1u) / threads);
+            unpack_rgba8_kernel<<<blocks, threads, 0, stream_>>>(
+                pixel_count, static_cast<const unsigned char*>(output_rgba8_dev_), output_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        case PixelFormat::R16G16B16A16_SFLOAT: {
+            ensure_rgba16_capacity(pixel_count);
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(output_rgba16_dev_,
+                                                target.user_handle,
+                                                pixel_count * 4u * sizeof(std::uint16_t),
+                                                cudaMemcpyHostToDevice,
+                                                stream_));
+            constexpr int threads = 256;
+            const int blocks = static_cast<int>((pixel_count + threads - 1u) / threads);
+            unpack_rgba16f_kernel<<<blocks, threads, 0, stream_>>>(
+                pixel_count, static_cast<const unsigned short*>(output_rgba16_dev_), output_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        default:
+            throw std::runtime_error("cuda::Rasterizer: HOST_BUFFER target format is not supported");
+        }
+    }
+
+    void clear_empty_target(const ImageDesc& desc,
+                            const RenderParams& params,
+                            const RenderTarget& target) {
+        if (!params.clear_to_background) {
+            return;
+        }
+
+        const std::size_t pixel_count = static_cast<std::size_t>(desc.width) * desc.height;
+        const float4 clear{
+            params.background.x,
+            params.background.y,
+            params.background.z,
+            0.0f,
+        };
+
+        if (target.kind == RenderTargetKind::HOST_BUFFER) {
+            ensure_output_capacity(pixel_count);
+            constexpr int threads = 256;
+            const int blocks = static_cast<int>((pixel_count + threads - 1u) / threads);
+            clear_rgba32f_kernel<<<blocks, threads, 0, stream_>>>(
+                pixel_count, clear, output_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            copy_output_to_target(desc, target);
+            return;
+        }
+
+        if (desc.format != PixelFormat::R8G8B8A8_UNORM &&
+            desc.format != PixelFormat::R8G8B8A8_SRGB) {
+            throw std::runtime_error(
+                "cuda::Rasterizer: INTEROP_IMAGE currently requires RGBA8/SDR format");
+        }
+        if (desc.mip_levels != 1 || desc.array_layers != 1) {
+            throw std::runtime_error(
+                "cuda::Rasterizer: INTEROP_IMAGE currently supports only 2D level-0 layer-0 output");
+        }
+
+        const dim3 block(16, 16, 1);
+        const dim3 grid((desc.width + block.x - 1u) / block.x,
+                        (desc.height + block.y - 1u) / block.y,
+                        1);
+        const auto surface = static_cast<cudaSurfaceObject_t>(
+            reinterpret_cast<std::uintptr_t>(target.user_handle));
+        clear_surface_rgba8_kernel<<<grid, block, 0, stream_>>>(
+            desc.width, desc.height, clear, surface);
+        VKGSPLAT_CUDA_CHECK(cudaGetLastError());
     }
 
     void copy_output_to_target(const ImageDesc& desc, const RenderTarget& target) {

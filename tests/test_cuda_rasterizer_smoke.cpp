@@ -128,6 +128,87 @@ int main() {
     RenderParams params;
     params.background = { 0.0f, 0.0f, 0.0f };
 
+    Scene empty_scene;
+    renderer->upload(empty_scene);
+    RenderParams empty_params;
+    empty_params.background = { 0.125f, 0.25f, 0.5f };
+
+    std::vector<vkgsplat::float4> empty_pixels(4 * 4, { -1.0f, -1.0f, -1.0f, -1.0f });
+    const RenderTarget empty_target{
+        RenderTargetKind::HOST_BUFFER,
+        { 4, 4, PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
+        empty_pixels.data(),
+    };
+    const FrameId empty_frame = renderer->render(camera, empty_params, empty_target);
+    renderer->wait(empty_frame);
+    if (!near(empty_pixels[0].x, empty_params.background.x) ||
+        !near(empty_pixels[0].y, empty_params.background.y) ||
+        !near(empty_pixels[0].z, empty_params.background.z) ||
+        !near(empty_pixels[0].w, 0.0f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty FP32 clear mismatch: pixel=(%.4f %.4f %.4f %.4f)\n",
+                     empty_pixels[0].x,
+                     empty_pixels[0].y,
+                     empty_pixels[0].z,
+                     empty_pixels[0].w);
+        return 1;
+    }
+    const auto empty_stats = cuda_renderer->last_stats();
+    if (empty_stats.projected_splats != 0u || empty_stats.nonempty_tiles != 0u ||
+        empty_stats.tile_splat_entries != 0u || empty_stats.tile_splat_overflow != 0u ||
+        empty_stats.max_tile_splats != 0u) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty stats mismatch: projected=%u nonempty=%u entries=%u overflow=%u max=%u\n",
+                     empty_stats.projected_splats,
+                     empty_stats.nonempty_tiles,
+                     empty_stats.tile_splat_entries,
+                     empty_stats.tile_splat_overflow,
+                     empty_stats.max_tile_splats);
+        return 1;
+    }
+
+    std::vector<std::uint8_t> empty_pixels_u8(4 * 4 * 4, 255);
+    const RenderTarget empty_target_u8{
+        RenderTargetKind::HOST_BUFFER,
+        { 4, 4, PixelFormat::R8G8B8A8_UNORM, 1, 1 },
+        empty_pixels_u8.data(),
+    };
+    const FrameId empty_frame_u8 = renderer->render(camera, empty_params, empty_target_u8);
+    renderer->wait(empty_frame_u8);
+    if (!near_u8(empty_pixels_u8[0], 32u, 1) ||
+        !near_u8(empty_pixels_u8[1], 64u, 1) ||
+        !near_u8(empty_pixels_u8[2], 128u, 1) ||
+        !near_u8(empty_pixels_u8[3], 0u, 1)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty RGBA8 clear mismatch: pixel=(%u %u %u %u)\n",
+                     static_cast<unsigned>(empty_pixels_u8[0]),
+                     static_cast<unsigned>(empty_pixels_u8[1]),
+                     static_cast<unsigned>(empty_pixels_u8[2]),
+                     static_cast<unsigned>(empty_pixels_u8[3]));
+        return 1;
+    }
+
+    std::vector<std::uint16_t> empty_pixels_f16(4 * 4 * 4, 0xffffu);
+    const RenderTarget empty_target_f16{
+        RenderTargetKind::HOST_BUFFER,
+        { 4, 4, PixelFormat::R16G16B16A16_SFLOAT, 1, 1 },
+        empty_pixels_f16.data(),
+    };
+    const FrameId empty_frame_f16 = renderer->render(camera, empty_params, empty_target_f16);
+    renderer->wait(empty_frame_f16);
+    if (!near(half_to_float(empty_pixels_f16[0]), empty_params.background.x, 1.0e-3f) ||
+        !near(half_to_float(empty_pixels_f16[1]), empty_params.background.y, 1.0e-3f) ||
+        !near(half_to_float(empty_pixels_f16[2]), empty_params.background.z, 1.0e-3f) ||
+        !near(half_to_float(empty_pixels_f16[3]), 0.0f, 1.0e-3f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty FP16 clear mismatch: pixel=(%.4f %.4f %.4f %.4f)\n",
+                     half_to_float(empty_pixels_f16[0]),
+                     half_to_float(empty_pixels_f16[1]),
+                     half_to_float(empty_pixels_f16[2]),
+                     half_to_float(empty_pixels_f16[3]));
+        return 1;
+    }
+
     std::vector<vkgsplat::float4> pixels(16 * 16, { 1.0f, 1.0f, 1.0f, 1.0f });
     const RenderTarget target{
         RenderTargetKind::HOST_BUFFER,
@@ -167,6 +248,86 @@ int main() {
         std::fprintf(stderr,
                      "CUDA rasterizer did not blend near red over far blue: center=(%.4f %.4f %.4f %.4f)\n",
                      center.x, center.y, center.z, center.w);
+        return 1;
+    }
+
+    RenderParams preserve_params = params;
+    preserve_params.clear_to_background = false;
+    std::vector<vkgsplat::float4> preserve_pixels(16 * 16, { 0.125f, 0.25f, 0.5f, 0.5f });
+    const RenderTarget preserve_target{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
+        preserve_pixels.data(),
+    };
+    const FrameId preserve_frame = renderer->render(camera, preserve_params, preserve_target);
+    renderer->wait(preserve_frame);
+    const vkgsplat::float4 preserve_corner = preserve_pixels[0];
+    if (!near(preserve_corner.x, 0.125f) || !near(preserve_corner.y, 0.25f) ||
+        !near(preserve_corner.z, 0.5f) || !near(preserve_corner.w, 0.5f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer preserve-mode corner mismatch: corner=(%.4f %.4f %.4f %.4f)\n",
+                     preserve_corner.x, preserve_corner.y, preserve_corner.z, preserve_corner.w);
+        return 1;
+    }
+    const auto preserve_stats = cuda_renderer->last_stats();
+    if (preserve_stats.projected_splats != 2u || preserve_stats.tile_splat_entries != 2u) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer preserve stats mismatch: projected=%u entries=%u\n",
+                     preserve_stats.projected_splats, preserve_stats.tile_splat_entries);
+        return 1;
+    }
+
+    std::vector<std::uint8_t> preserve_pixels_u8(16 * 16 * 4);
+    for (std::size_t i = 0; i < preserve_pixels_u8.size(); i += 4u) {
+        preserve_pixels_u8[i + 0u] = 32u;
+        preserve_pixels_u8[i + 1u] = 64u;
+        preserve_pixels_u8[i + 2u] = 128u;
+        preserve_pixels_u8[i + 3u] = 127u;
+    }
+    const RenderTarget preserve_target_u8{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R8G8B8A8_UNORM, 1, 1 },
+        preserve_pixels_u8.data(),
+    };
+    const FrameId preserve_frame_u8 =
+        renderer->render(camera, preserve_params, preserve_target_u8);
+    renderer->wait(preserve_frame_u8);
+    if (!near_u8(preserve_pixels_u8[0], 32u) || !near_u8(preserve_pixels_u8[1], 64u) ||
+        !near_u8(preserve_pixels_u8[2], 128u) || !near_u8(preserve_pixels_u8[3], 127u)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer RGBA8 preserve-mode corner mismatch: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(preserve_pixels_u8[0]),
+                     static_cast<unsigned>(preserve_pixels_u8[1]),
+                     static_cast<unsigned>(preserve_pixels_u8[2]),
+                     static_cast<unsigned>(preserve_pixels_u8[3]));
+        return 1;
+    }
+
+    std::vector<std::uint16_t> preserve_pixels_f16(16 * 16 * 4);
+    for (std::size_t i = 0; i < preserve_pixels_f16.size(); i += 4u) {
+        preserve_pixels_f16[i + 0u] = 0x3000u; // 0.125
+        preserve_pixels_f16[i + 1u] = 0x3400u; // 0.25
+        preserve_pixels_f16[i + 2u] = 0x3800u; // 0.5
+        preserve_pixels_f16[i + 3u] = 0x3a00u; // 0.75
+    }
+    const RenderTarget preserve_target_f16{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R16G16B16A16_SFLOAT, 1, 1 },
+        preserve_pixels_f16.data(),
+    };
+    const FrameId preserve_frame_f16 =
+        renderer->render(camera, preserve_params, preserve_target_f16);
+    renderer->wait(preserve_frame_f16);
+    if (!near(half_to_float(preserve_pixels_f16[0]), 0.125f, 1.0e-3f) ||
+        !near(half_to_float(preserve_pixels_f16[1]), 0.25f, 1.0e-3f) ||
+        !near(half_to_float(preserve_pixels_f16[2]), 0.5f, 1.0e-3f) ||
+        !near(half_to_float(preserve_pixels_f16[3]), 0.75f, 1.0e-3f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer FP16 preserve-mode corner mismatch: corner=(%.4f %.4f %.4f %.4f)\n",
+                     half_to_float(preserve_pixels_f16[0]),
+                     half_to_float(preserve_pixels_f16[1]),
+                     half_to_float(preserve_pixels_f16[2]),
+                     half_to_float(preserve_pixels_f16[3]));
         return 1;
     }
 
@@ -237,7 +398,7 @@ int main() {
     }
 
     const std::size_t center_f16 = (8 * 16 + 8) * 4;
-    const float4 center_half{
+    const vkgsplat::float4 center_half{
         half_to_float(pixels_f16[center_f16 + 0]),
         half_to_float(pixels_f16[center_f16 + 1]),
         half_to_float(pixels_f16[center_f16 + 2]),
