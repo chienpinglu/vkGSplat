@@ -6,10 +6,13 @@
 //
 //   preprocess_kernel   per-Gaussian: cull, project mean, build 2D conic,
 //                       compute screen-space tile coverage.
-//   sort_pairs          radix-sort (key,value) = (depth|tile_id, gaussian_id).
-//                       v1 uses CUB device-wide radix sort.
-//   identify_ranges     scan to find the (start,end) of each tile in the
-//                       sorted list.
+//   sort_pairs          production target: radix-sort
+//                       (key,value) = (depth|tile_id, gaussian_id).
+//   identify_ranges     production target: scan to find each tile's
+//                       (start,end) span. M1 currently uses a correctness-first
+//                       count/scan/scatter path; production will replace the
+//                       serial scan and tile-local sort with parallel
+//                       CUB/Thrust or custom primitives.
 //   blend_kernel        per-tile, per-pixel front-to-back alpha blend.
 //
 // The implementation is being moved stage-by-stage from a host oracle
@@ -506,6 +509,111 @@ __global__ void build_fixed_tile_lists_kernel(int num_gaussians,
     }
 }
 
+
+__global__ void count_compact_tile_entries_kernel(int num_gaussians,
+                                                  const PreprocessedGaussian* __restrict__ preprocessed,
+                                                  std::uint32_t* __restrict__ tile_counts,
+                                                  int tiles_x,
+                                                  int tiles_y) {
+    const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= num_gaussians) return;
+
+    const PreprocessedGaussian p = preprocessed[index];
+    if (p.alpha <= 0.0f) return;
+
+    const int min_x = clamp_int_device(p.tile_min_x, 0, tiles_x);
+    const int max_x = clamp_int_device(p.tile_max_x, 0, tiles_x);
+    const int min_y = clamp_int_device(p.tile_min_y, 0, tiles_y);
+    const int max_y = clamp_int_device(p.tile_max_y, 0, tiles_y);
+    for (int tile_y = min_y; tile_y < max_y; ++tile_y) {
+        for (int tile_x = min_x; tile_x < max_x; ++tile_x) {
+            const std::uint32_t tile =
+                static_cast<std::uint32_t>(tile_y * tiles_x + tile_x);
+            atomicAdd(&tile_counts[tile], 1u);
+        }
+    }
+}
+
+__global__ void build_compact_tile_offsets_kernel(std::uint32_t tile_count,
+                                                  const std::uint32_t* __restrict__ tile_counts,
+                                                  std::uint32_t* __restrict__ tile_offsets) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    std::uint32_t sum = 0;
+    tile_offsets[0] = 0;
+    for (std::uint32_t i = 0; i < tile_count; ++i) {
+        sum += tile_counts[i];
+        tile_offsets[i + 1u] = sum;
+    }
+}
+
+__global__ void scatter_compact_tile_entries_kernel(int num_gaussians,
+                                                    const PreprocessedGaussian* __restrict__ preprocessed,
+                                                    std::uint32_t* __restrict__ sorted_projected_indices,
+                                                    const std::uint32_t* __restrict__ tile_offsets,
+                                                    std::uint32_t* __restrict__ tile_write_counts,
+                                                    int tiles_x,
+                                                    int tiles_y) {
+    const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= num_gaussians) return;
+
+    const PreprocessedGaussian p = preprocessed[index];
+    if (p.alpha <= 0.0f) return;
+
+    const int min_x = clamp_int_device(p.tile_min_x, 0, tiles_x);
+    const int max_x = clamp_int_device(p.tile_max_x, 0, tiles_x);
+    const int min_y = clamp_int_device(p.tile_min_y, 0, tiles_y);
+    const int max_y = clamp_int_device(p.tile_max_y, 0, tiles_y);
+    for (int tile_y = min_y; tile_y < max_y; ++tile_y) {
+        for (int tile_x = min_x; tile_x < max_x; ++tile_x) {
+            const std::uint32_t tile =
+                static_cast<std::uint32_t>(tile_y * tiles_x + tile_x);
+            const std::uint32_t local = atomicAdd(&tile_write_counts[tile], 1u);
+            sorted_projected_indices[tile_offsets[tile] + local] = static_cast<std::uint32_t>(index);
+        }
+    }
+}
+
+__global__ void finalize_compact_tile_ranges_kernel(std::uint32_t tile_count,
+                                                    const GpuProjectedSplat* __restrict__ projected,
+                                                    std::uint32_t* __restrict__ sorted_projected_indices,
+                                                    const std::uint32_t* __restrict__ tile_offsets,
+                                                    GpuTileRange* __restrict__ tile_ranges,
+                                                    RasterizerFrameStats* __restrict__ stats) {
+    const std::uint32_t tile = blockIdx.x;
+    if (tile >= tile_count || threadIdx.x != 0) return;
+
+    const std::uint32_t begin = tile_offsets[tile];
+    const std::uint32_t end = tile_offsets[tile + 1u];
+    const std::uint32_t count = end - begin;
+
+    for (std::uint32_t i = begin + 1u; i < end; ++i) {
+        const std::uint32_t key = sorted_projected_indices[i];
+        const float key_depth = projected[key].depth;
+        std::uint32_t j = i;
+        while (j > begin) {
+            const std::uint32_t prev = sorted_projected_indices[j - 1u];
+            const float prev_depth = projected[prev].depth;
+            if (prev_depth > key_depth ||
+                (prev_depth == key_depth && prev <= key)) {
+                break;
+            }
+            sorted_projected_indices[j] = prev;
+            --j;
+        }
+        sorted_projected_indices[j] = key;
+    }
+
+    tile_ranges[tile] = { begin, count };
+    if (stats) {
+        if (count > 0u) {
+            atomicAdd(&stats->nonempty_tiles, 1u);
+        }
+        atomicAdd(&stats->tile_splat_entries, count);
+        atomicMax(&stats->max_tile_splats, count);
+    }
+}
+
 __device__ unsigned char to_unorm8_device(float v) {
     const float clamped = fminf(fmaxf(v, 0.0f), 1.0f);
     return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
@@ -611,6 +719,9 @@ public:
         if (projected_dev_) cudaFree(projected_dev_);
         if (sorted_indices_dev_) cudaFree(sorted_indices_dev_);
         if (tile_ranges_dev_) cudaFree(tile_ranges_dev_);
+        if (tile_counts_dev_) cudaFree(tile_counts_dev_);
+        if (tile_offsets_dev_) cudaFree(tile_offsets_dev_);
+        if (tile_write_counts_dev_) cudaFree(tile_write_counts_dev_);
         if (stats_dev_) cudaFree(stats_dev_);
         if (output_dev_) cudaFree(output_dev_);
         if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
@@ -689,7 +800,13 @@ public:
         if (tunables_.tile_size <= 0) {
             throw std::runtime_error("cuda::Rasterizer: tile_size must be positive");
         }
-        if (tunables_.max_splats_per_tile <= 0) {
+        const std::uint64_t tile_pixels =
+            static_cast<std::uint64_t>(tunables_.tile_size) *
+            static_cast<std::uint64_t>(tunables_.tile_size);
+        if (tile_pixels > 1024u) {
+            throw std::runtime_error("cuda::Rasterizer: tile_size squared exceeds CUDA block size");
+        }
+        if (!tunables_.use_compact_tile_lists && tunables_.max_splats_per_tile <= 0) {
             throw std::runtime_error("cuda::Rasterizer: max_splats_per_tile must be positive");
         }
 
@@ -697,16 +814,29 @@ public:
         const auto tile_size = static_cast<std::uint32_t>(tunables_.tile_size);
         const TileGrid grid = make_tile_grid(desc, tile_size);
         const std::size_t tile_count = static_cast<std::size_t>(grid.tiles_x) * grid.tiles_y;
-        const auto max_splats_per_tile =
-            static_cast<std::uint32_t>(tunables_.max_splats_per_tile);
-        const std::size_t fixed_index_capacity =
-            tile_count * static_cast<std::size_t>(max_splats_per_tile);
-        if (fixed_index_capacity >
-            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-            throw std::runtime_error("cuda::Rasterizer: fixed tile-list capacity exceeds uint32 offsets");
+        if (tile_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            throw std::runtime_error("cuda::Rasterizer: tile count exceeds uint32 offsets");
+        }
+        if (gaussian_count_ > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            desc.width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+            desc.height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+            grid.tiles_x > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+            grid.tiles_y > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("cuda::Rasterizer: launch dimensions exceed int range");
+        }
+        std::size_t initial_index_capacity = 1u;
+        if (!tunables_.use_compact_tile_lists) {
+            const auto max_splats_per_tile =
+                static_cast<std::uint32_t>(tunables_.max_splats_per_tile);
+            initial_index_capacity = tile_count * static_cast<std::size_t>(max_splats_per_tile);
+            if (initial_index_capacity >
+                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+                throw std::runtime_error(
+                    "cuda::Rasterizer: fixed tile-list capacity exceeds uint32 offsets");
+            }
         }
         ensure_device_capacity(gaussian_count_,
-                               fixed_index_capacity,
+                               initial_index_capacity,
                                tile_count,
                                static_cast<std::size_t>(desc.width) * desc.height);
         last_frame_stats_ = {};
@@ -732,17 +862,69 @@ public:
             tunables_.max_radii_pixels);
         VKGSPLAT_CUDA_CHECK(cudaGetLastError());
 
-        build_fixed_tile_lists_kernel<<<static_cast<unsigned int>(tile_count), 1, 0, stream_>>>(
-            static_cast<int>(gaussian_count_),
-            preprocessed_dev_,
-            projected_dev_,
-            sorted_indices_dev_,
-            tile_ranges_dev_,
-            stats_dev_,
-            static_cast<int>(grid.tiles_x),
-            static_cast<int>(grid.tiles_y),
-            tunables_.max_splats_per_tile);
-        VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+        if (tunables_.use_compact_tile_lists) {
+            ensure_compact_tile_aux_capacity(tile_count);
+            VKGSPLAT_CUDA_CHECK(cudaMemsetAsync(tile_counts_dev_,
+                                                0,
+                                                sizeof(std::uint32_t) * tile_count,
+                                                stream_));
+            count_compact_tile_entries_kernel<<<blocks, threads, 0, stream_>>>(
+                static_cast<int>(gaussian_count_),
+                preprocessed_dev_,
+                tile_counts_dev_,
+                static_cast<int>(grid.tiles_x),
+                static_cast<int>(grid.tiles_y));
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+
+            const auto tile_count_u32 = static_cast<std::uint32_t>(tile_count);
+            build_compact_tile_offsets_kernel<<<1, 1, 0, stream_>>>(
+                tile_count_u32, tile_counts_dev_, tile_offsets_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+
+            std::uint32_t compact_index_count = 0;
+            VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&compact_index_count,
+                                                tile_offsets_dev_ + tile_count,
+                                                sizeof(compact_index_count),
+                                                cudaMemcpyDeviceToHost,
+                                                stream_));
+            VKGSPLAT_CUDA_CHECK(cudaStreamSynchronize(stream_));
+            ensure_sorted_index_capacity(compact_index_count > 0u ? compact_index_count : 1u);
+            VKGSPLAT_CUDA_CHECK(cudaMemsetAsync(tile_write_counts_dev_,
+                                                0,
+                                                sizeof(std::uint32_t) * tile_count,
+                                                stream_));
+            if (compact_index_count > 0u) {
+                scatter_compact_tile_entries_kernel<<<blocks, threads, 0, stream_>>>(
+                    static_cast<int>(gaussian_count_),
+                    preprocessed_dev_,
+                    sorted_indices_dev_,
+                    tile_offsets_dev_,
+                    tile_write_counts_dev_,
+                    static_cast<int>(grid.tiles_x),
+                    static_cast<int>(grid.tiles_y));
+                VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            }
+            finalize_compact_tile_ranges_kernel<<<static_cast<unsigned int>(tile_count), 1, 0, stream_>>>(
+                tile_count_u32,
+                projected_dev_,
+                sorted_indices_dev_,
+                tile_offsets_dev_,
+                tile_ranges_dev_,
+                stats_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+        } else {
+            build_fixed_tile_lists_kernel<<<static_cast<unsigned int>(tile_count), 1, 0, stream_>>>(
+                static_cast<int>(gaussian_count_),
+                preprocessed_dev_,
+                projected_dev_,
+                sorted_indices_dev_,
+                tile_ranges_dev_,
+                stats_dev_,
+                static_cast<int>(grid.tiles_x),
+                static_cast<int>(grid.tiles_y),
+                tunables_.max_splats_per_tile);
+            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+        }
 
         const TileRendererLaunch tile_launch{
             desc.width,
@@ -763,10 +945,6 @@ public:
             VKGSPLAT_CUDA_CHECK(cudaGetLastError());
             copy_output_to_target(desc, target);
         } else {
-            if (!params.clear_to_background) {
-                throw std::runtime_error(
-                    "cuda::Rasterizer: INTEROP_IMAGE preserve mode requires a surface-read path");
-            }
             launch_surface_output(desc, tile_launch, target);
         }
         VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&last_frame_stats_,
@@ -791,6 +969,10 @@ public:
 
     [[nodiscard]] RasterizerFrameStats last_stats() const { return last_frame_stats_; }
 
+    void set_tunables(const RasterizerTunables& tunables) { tunables_ = tunables; }
+
+    [[nodiscard]] RasterizerTunables tunables() const { return tunables_; }
+
 private:
     void ensure_device_capacity(std::size_t projected_count,
                                 std::size_t sorted_index_count,
@@ -802,12 +984,7 @@ private:
                                           sizeof(GpuProjectedSplat) * projected_count));
             projected_capacity_ = projected_count;
         }
-        if (sorted_index_count > sorted_index_capacity_) {
-            if (sorted_indices_dev_) cudaFree(sorted_indices_dev_);
-            VKGSPLAT_CUDA_CHECK(cudaMalloc(&sorted_indices_dev_,
-                                          sizeof(std::uint32_t) * sorted_index_count));
-            sorted_index_capacity_ = sorted_index_count;
-        }
+        ensure_sorted_index_capacity(sorted_index_count);
         if (tile_count > tile_range_capacity_) {
             if (tile_ranges_dev_) cudaFree(tile_ranges_dev_);
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_ranges_dev_,
@@ -818,6 +995,34 @@ private:
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&stats_dev_, sizeof(RasterizerFrameStats)));
         }
         ensure_output_capacity(pixel_count);
+    }
+
+    void ensure_sorted_index_capacity(std::size_t sorted_index_count) {
+        if (sorted_index_count > sorted_index_capacity_) {
+            if (sorted_indices_dev_) cudaFree(sorted_indices_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&sorted_indices_dev_,
+                                          sizeof(std::uint32_t) * sorted_index_count));
+            sorted_index_capacity_ = sorted_index_count;
+        }
+    }
+
+    void ensure_compact_tile_aux_capacity(std::size_t tile_count) {
+        if (tile_count > compact_tile_capacity_) {
+            if (tile_counts_dev_) cudaFree(tile_counts_dev_);
+            if (tile_write_counts_dev_) cudaFree(tile_write_counts_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_counts_dev_,
+                                          sizeof(std::uint32_t) * tile_count));
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_write_counts_dev_,
+                                          sizeof(std::uint32_t) * tile_count));
+            compact_tile_capacity_ = tile_count;
+        }
+        const std::size_t offset_count = tile_count + 1u;
+        if (offset_count > compact_tile_offset_capacity_) {
+            if (tile_offsets_dev_) cudaFree(tile_offsets_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_offsets_dev_,
+                                          sizeof(std::uint32_t) * offset_count));
+            compact_tile_offset_capacity_ = offset_count;
+        }
     }
 
     void ensure_output_capacity(std::size_t pixel_count) {
@@ -1015,6 +1220,9 @@ private:
     GpuProjectedSplat*    projected_dev_       = nullptr;
     std::uint32_t*        sorted_indices_dev_  = nullptr;
     GpuTileRange*         tile_ranges_dev_     = nullptr;
+    std::uint32_t*        tile_counts_dev_     = nullptr;
+    std::uint32_t*        tile_offsets_dev_    = nullptr;
+    std::uint32_t*        tile_write_counts_dev_ = nullptr;
     RasterizerFrameStats*  stats_dev_           = nullptr;
     float4*               output_dev_          = nullptr;
     void*                 output_rgba8_dev_    = nullptr;
@@ -1022,6 +1230,8 @@ private:
     std::size_t           projected_capacity_  = 0;
     std::size_t           sorted_index_capacity_ = 0;
     std::size_t           tile_range_capacity_ = 0;
+    std::size_t           compact_tile_capacity_ = 0;
+    std::size_t           compact_tile_offset_capacity_ = 0;
     std::size_t           output_capacity_     = 0;
     std::size_t           output_rgba8_capacity_bytes_ = 0;
     std::size_t           output_rgba16_capacity_bytes_ = 0;
@@ -1052,6 +1262,12 @@ FrameId Rasterizer::render(const Camera& camera,
 void Rasterizer::wait(FrameId frame) { impl_->wait(frame); }
 
 RasterizerFrameStats Rasterizer::last_stats() const { return impl_->last_stats(); }
+
+void Rasterizer::set_tunables(const RasterizerTunables& tunables) {
+    impl_->set_tunables(tunables);
+}
+
+RasterizerTunables Rasterizer::tunables() const { return impl_->tunables(); }
 
 void Rasterizer::bind_to_device_uuid(const std::array<unsigned char, 16>& uuid) {
     impl_->bind_to_uuid(uuid);

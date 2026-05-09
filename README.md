@@ -120,27 +120,37 @@ cmake --build build-cpu --parallel 4
 ctest --test-dir build-cpu --output-on-failure
 ```
 
-On this Mac, the latest local run passed all 11 default tests. CUDA is not
-validated locally because the machine does not have `nvcc`; CMake stops with
-`Failed to find nvcc`.
+On this Mac, the latest local run passed all 10 CPU/default tests. CUDA is not
+validated locally because the machine does not have `nvcc`; the CUDA configure
+cache records `CMAKE_CUDA_COMPILER-NOTFOUND`.
 
 On an NVIDIA CUDA workstation, use the RTX 5090 bring-up plan:
 `docs/rtx5090_workstation_test_plan.md`. The CUDA gate currently includes:
 
 - `test_cuda_tile_renderer`: validates the tile blend kernel on a tiny
-  projected-splat fixture, including direct RGBA8 CUDA surface writes.
+  projected-splat fixture, float-buffer output, RGBA8 CUDA-surface output,
+  surface preserve mode, and invalid launch rejection for oversized tiles,
+  missing output buffers, and missing surface handles.
 - `test_cuda_rasterizer_smoke`: exercises the public `make_renderer("cuda")`
   path through upload, CUDA preprocess/projection, deterministic fixed-capacity
-  device tile lists/ranges, tile blending, host-buffer readback, and
-  `INTEROP_IMAGE` CUDA-surface output.
+  device tile lists/ranges, tile blending, `HOST_BUFFER` readback in FP32,
+  RGBA8, and FP16, empty-scene clears, preserve mode, CUDA-surface
+  `INTEROP_IMAGE` clear/preserve output, frame stats, and CUDA rasterizer
+  tunable validation.
 - `test_cuda_gaussian_reconstruction`: validates the tensorized reconstruction
   kernels for nvdiffrast/seed-buffer ingestion, device-side sample counts,
   tile bin/compact/resolve, gated weighted resolve, state update, and feature
   projection.
 
-The native Vulkan hardware gate remains separate: run the Wicked/NVIDIA smoke
-test on a Linux or Windows NVIDIA Vulkan stack, then run the CUDA gates, then
-run CUDA+Vulkan interop once both sides independently pass.
+The CUDA rasterizer now has an opt-in M1 count/scan/scatter tile-list path via
+`RasterizerTunables::use_compact_tile_lists`. In compact mode the renderer no
+longer depends on `max_splats_per_tile`; the fixed-capacity M0 path remains
+available for fallback and comparison until CUDA workstation validation passes.
+The next CUDA renderer milestone is replacing the M1 serial prefix/sort pieces
+with production CUB/Thrust or custom parallel primitives and making compact tile
+lists the default. The native Vulkan hardware gate remains separate: run the
+Wicked/NVIDIA smoke test on a Linux or Windows NVIDIA Vulkan stack, then run the
+CUDA gates, then run CUDA+Vulkan interop once both sides independently pass.
 
 ## Wicked Engine on NVIDIA Vulkan
 

@@ -316,13 +316,19 @@ Pass criteria:
 - CMake detects CUDA Toolkit 12.8 or newer.
 - `nvcc` accepts `sm_120`.
 - `test_cuda_tile_renderer` passes: the CUDA tile blend kernel consumes
-  `GpuProjectedSplat`, sorted indices, and `GpuTileRange` and produces the
-  expected blended pixel in both float-buffer and RGBA8 CUDA-surface outputs.
+  `GpuProjectedSplat`, sorted indices, and `GpuTileRange`; produces the
+  expected blended pixel in float-buffer and RGBA8 CUDA-surface outputs; checks
+  surface preserve mode against the float-buffer preserve path; and rejects
+  invalid launches such as oversized tiles, missing output buffers, and missing
+  surface handles.
 - `test_cuda_rasterizer_smoke` passes: the public `make_renderer("cuda")`
   path runs `upload -> render -> wait` through CUDA preprocess/projection,
-  fixed-capacity deterministic device tile lists, tile blending, and
-  `HOST_BUFFER` readback, then writes the same frame through
-  `RenderTargetKind::INTEROP_IMAGE` into a CUDA surface object.
+  fixed-capacity deterministic device tile lists, opt-in compact tile lists,
+  tile blending, and `HOST_BUFFER` readback for FP32, RGBA8, and FP16 targets.
+  It also validates empty-scene clears, preserve mode, frame stats, CUDA
+  rasterizer tunable rejection, and `RenderTargetKind::INTEROP_IMAGE`
+  CUDA-surface output for normal frames, empty clears, and preserve-mode
+  blending.
 - `test_cuda_gaussian_reconstruction` passes: the tensorized reconstruction
   path handles nvdiffrast/seed-buffer ingestion, device-side sample counts,
   tile bin/compact/resolve, gated weighted resolve, state update, and feature
@@ -333,10 +339,19 @@ Pass criteria:
 
 Important M0 limitation:
 
-- The CUDA rasterizer currently uses a fixed-capacity deterministic per-tile
-  list (`max_splats_per_tile`) as a bridge before count/scan/scatter plus
-  depth-key sorting. It reports overflow after stream synchronization. Any
-  overflow in this phase is a test finding, not a performance result.
+- The CUDA rasterizer still keeps the fixed-capacity deterministic per-tile
+  list (`max_splats_per_tile`) as the M0 fallback. It also exposes an opt-in M1
+  count/scan/scatter path through `RasterizerTunables::use_compact_tile_lists`:
+  count each projected splat's tile intersections, prefix-sum tile counts,
+  scatter duplicated splat IDs into compact tile spans, then order each tile
+  before blending. The smoke test should exercise this compact path with
+  `max_splats_per_tile=0` to show it is independent of fixed-list capacity.
+- The M1 compact path is still correctness-first: it uses a simple device prefix
+  pass plus per-tile insertion sorting and includes a small host readback for the
+  compact entry count. The next renderer implementation milestone is replacing
+  those pieces with production CUB/Thrust or custom parallel primitives and then
+  making compact tile lists the default. Do not treat timings from either M0 or
+  M1 as representative of production performance yet.
 
 ## Phase 6: CUDA + Vulkan Interop Probe
 

@@ -5,9 +5,49 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace vkgsplat::cuda {
 namespace {
+
+constexpr std::uint32_t kMaxTileRendererThreads = 1024u;
+
+void validate_launch(const TileRendererLaunch& launch) {
+    if (launch.width == 0u || launch.height == 0u) {
+        throw std::runtime_error("cuda tile renderer: image dimensions must be nonzero");
+    }
+    if (launch.tile_size == 0u) {
+        throw std::runtime_error("cuda tile renderer: tile_size must be positive");
+    }
+    const std::uint64_t pixels_per_tile =
+        static_cast<std::uint64_t>(launch.tile_size) * launch.tile_size;
+    if (pixels_per_tile > kMaxTileRendererThreads) {
+        throw std::runtime_error("cuda tile renderer: tile_size squared exceeds CUDA block size");
+    }
+    if (launch.tiles_x == 0u || launch.tiles_y == 0u) {
+        throw std::runtime_error("cuda tile renderer: tile grid must be nonempty");
+    }
+}
+
+void validate_projected_inputs(const GpuProjectedSplat* projected,
+                               const std::uint32_t* sorted_projected_indices,
+                               const GpuTileRange* tile_ranges) {
+    if (!projected || !sorted_projected_indices || !tile_ranges) {
+        throw std::runtime_error("cuda tile renderer: projected splats, sorted indices, and tile ranges are required");
+    }
+}
+
+void validate_output_buffer(const float4* output_rgba) {
+    if (!output_rgba) {
+        throw std::runtime_error("cuda tile renderer: output buffer is required");
+    }
+}
+
+void validate_surface_handle(const void* cuda_surface) {
+    if (!cuda_surface) {
+        throw std::runtime_error("cuda tile renderer: CUDA surface handle is required");
+    }
+}
 
 __device__ float clamp01(float v) {
     return fminf(fmaxf(v, 0.0f), 1.0f);
@@ -69,6 +109,16 @@ __device__ unsigned char to_unorm8(float v) {
     return static_cast<unsigned char>(clamp01(v) * 255.0f + 0.5f);
 }
 
+__device__ float4 from_unorm8(uchar4 v) {
+    constexpr float inv_255 = 1.0f / 255.0f;
+    return {
+        static_cast<float>(v.x) * inv_255,
+        static_cast<float>(v.y) * inv_255,
+        static_cast<float>(v.z) * inv_255,
+        static_cast<float>(v.w) * inv_255,
+    };
+}
+
 __global__ void tile_surface_rgba8_kernel(TileRendererLaunch launch,
                                           const GpuProjectedSplat* projected,
                                           const std::uint32_t* sorted_projected_indices,
@@ -87,6 +137,10 @@ __global__ void tile_surface_rgba8_kernel(TileRendererLaunch launch,
     if (x >= launch.width || y >= launch.height) return;
 
     float4 color = launch.background;
+    if ((launch.flags & TILE_RENDERER_CLEAR_OUTPUT) == 0u) {
+        color = from_unorm8(
+            surf2Dread<uchar4>(surface, x * sizeof(uchar4), y, cudaBoundaryModeTrap));
+    }
     color.w = clamp01(color.w);
     const GpuTileRange range = tile_ranges[tile_y * launch.tiles_x + tile_x];
     const float sx = static_cast<float>(x) + 0.5f;
@@ -126,6 +180,9 @@ void launch_tile_renderer(const TileRendererLaunch& launch,
                           const GpuTileRange* tile_ranges,
                           float4* output_rgba,
                           void* cuda_stream) {
+    validate_launch(launch);
+    validate_projected_inputs(projected, sorted_projected_indices, tile_ranges);
+    validate_output_buffer(output_rgba);
     const dim3 grid(launch.tiles_x, launch.tiles_y, 1);
     const dim3 block(launch.tile_size * launch.tile_size, 1, 1);
     auto* stream = static_cast<cudaStream_t>(cuda_stream);
@@ -139,6 +196,9 @@ void launch_tile_renderer_surface_rgba8(const TileRendererLaunch& launch,
                                         const GpuTileRange* tile_ranges,
                                         void* cuda_surface,
                                         void* cuda_stream) {
+    validate_launch(launch);
+    validate_projected_inputs(projected, sorted_projected_indices, tile_ranges);
+    validate_surface_handle(cuda_surface);
     const dim3 grid(launch.tiles_x, launch.tiles_y, 1);
     const dim3 block(launch.tile_size * launch.tile_size, 1, 1);
     auto* stream = static_cast<cudaStream_t>(cuda_stream);

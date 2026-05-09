@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -37,6 +38,17 @@ bool near_u8(unsigned char a, unsigned char b, unsigned char eps = 1) {
 unsigned char pack_unorm8(float v) {
     const float clamped = std::fmin(std::fmax(v, 0.0f), 1.0f);
     return static_cast<unsigned char>(clamped * 255.0f + 0.5f);
+}
+
+template <typename Fn>
+bool expect_runtime_error(const char* label, Fn fn) {
+    try {
+        fn();
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    std::fprintf(stderr, "%s did not reject invalid launch\n", label);
+    return false;
 }
 
 } // namespace
@@ -69,6 +81,24 @@ int main() {
     };
     const std::uint32_t sorted_indices[] = { 0, 1 }; // far blue then near red
     const GpuTileRange ranges[] = { { 0, 2 } };
+
+    TileRendererLaunch invalid_tile_launch = launch;
+    invalid_tile_launch.tile_size = 33;
+    if (!expect_runtime_error("CUDA tile renderer oversized tile", [&] {
+            launch_tile_renderer(invalid_tile_launch, nullptr, nullptr, nullptr, nullptr, nullptr);
+        })) {
+        return 1;
+    }
+    if (!expect_runtime_error("CUDA tile renderer null output", [&] {
+            launch_tile_renderer(launch, projected, sorted_indices, ranges, nullptr, nullptr);
+        })) {
+        return 1;
+    }
+    if (!expect_runtime_error("CUDA tile surface null handle", [&] {
+            launch_tile_renderer_surface_rgba8(launch, projected, sorted_indices, ranges, nullptr, nullptr);
+        })) {
+        return 1;
+    }
     std::vector<vkgsplat::float4> pixels(
         launch.width * launch.height, { 0.0f, 0.0f, 0.0f, 1.0f });
 
@@ -140,8 +170,6 @@ int main() {
                                      launch.width * sizeof(uchar4),
                                      launch.height,
                                      cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaDestroySurfaceObject(surface));
-    CHECK_CUDA(cudaFreeArray(surface_array));
 
     const uchar4 surface_corner = surface_pixels[0];
     if (surface_corner.x != 0 || surface_corner.y != 0 ||
@@ -172,6 +200,90 @@ int main() {
                      center.w);
         return 1;
     }
+
+    std::vector<uchar4> preserve_seed(launch.width * launch.height);
+    for (auto& p : preserve_seed) {
+        p = make_uchar4(32u, 64u, 128u, 127u);
+    }
+    CHECK_CUDA(cudaMemcpy2DToArray(surface_array,
+                                   0,
+                                   0,
+                                   preserve_seed.data(),
+                                   launch.width * sizeof(uchar4),
+                                   launch.width * sizeof(uchar4),
+                                   launch.height,
+                                   cudaMemcpyHostToDevice));
+
+    TileRendererLaunch preserve_launch = launch;
+    preserve_launch.flags = 0u;
+
+    std::vector<vkgsplat::float4> preserve_pixels(
+        launch.width * launch.height,
+        vkgsplat::float4{ 32.0f / 255.0f, 64.0f / 255.0f, 128.0f / 255.0f, 127.0f / 255.0f });
+    CHECK_CUDA(cudaMemcpy(d_pixels,
+                          preserve_pixels.data(),
+                          sizeof(vkgsplat::float4) * preserve_pixels.size(),
+                          cudaMemcpyHostToDevice));
+    launch_tile_renderer(preserve_launch, d_projected, d_indices, d_ranges, d_pixels, nullptr);
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemcpy(preserve_pixels.data(),
+                          d_pixels,
+                          sizeof(vkgsplat::float4) * preserve_pixels.size(),
+                          cudaMemcpyDeviceToHost));
+    const vkgsplat::float4 preserve_center = preserve_pixels[8 * launch.width + 8];
+    launch_tile_renderer_surface_rgba8(
+        preserve_launch,
+        d_projected,
+        d_indices,
+        d_ranges,
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(surface)),
+        nullptr);
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    std::vector<uchar4> preserve_surface_pixels(launch.width * launch.height);
+    CHECK_CUDA(cudaMemcpy2DFromArray(preserve_surface_pixels.data(),
+                                     launch.width * sizeof(uchar4),
+                                     surface_array,
+                                     0,
+                                     0,
+                                     launch.width * sizeof(uchar4),
+                                     launch.height,
+                                     cudaMemcpyDeviceToHost));
+
+    const uchar4 preserve_corner = preserve_surface_pixels[0];
+    if (!near_u8(preserve_corner.x, 32u) || !near_u8(preserve_corner.y, 64u) ||
+        !near_u8(preserve_corner.z, 128u) || !near_u8(preserve_corner.w, 127u)) {
+        std::fprintf(stderr,
+                     "CUDA tile surface preserve-mode corner mismatch: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(preserve_corner.x),
+                     static_cast<unsigned>(preserve_corner.y),
+                     static_cast<unsigned>(preserve_corner.z),
+                     static_cast<unsigned>(preserve_corner.w));
+        return 1;
+    }
+
+    const uchar4 preserve_surface_center = preserve_surface_pixels[8 * launch.width + 8];
+    if (!near_u8(preserve_surface_center.x, pack_unorm8(preserve_center.x), 2) ||
+        !near_u8(preserve_surface_center.y, pack_unorm8(preserve_center.y), 2) ||
+        !near_u8(preserve_surface_center.z, pack_unorm8(preserve_center.z), 2) ||
+        !near_u8(preserve_surface_center.w, pack_unorm8(preserve_center.w), 2)) {
+        std::fprintf(stderr,
+                     "CUDA tile surface preserve-mode center mismatch: surface=(%u %u %u %u) float=(%.4f %.4f %.4f %.4f)\n",
+                     static_cast<unsigned>(preserve_surface_center.x),
+                     static_cast<unsigned>(preserve_surface_center.y),
+                     static_cast<unsigned>(preserve_surface_center.z),
+                     static_cast<unsigned>(preserve_surface_center.w),
+                     preserve_center.x,
+                     preserve_center.y,
+                     preserve_center.z,
+                     preserve_center.w);
+        return 1;
+    }
+
+    CHECK_CUDA(cudaDestroySurfaceObject(surface));
+    CHECK_CUDA(cudaFreeArray(surface_array));
 
     cudaFree(d_projected);
     cudaFree(d_indices);

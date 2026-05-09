@@ -25,6 +25,7 @@
 namespace vkgsplat::cuda {
 
 class RasterizerImpl; // forward decl, defined in src/cuda/rasterizer.cu
+struct RasterizerTunables;
 
 struct RasterizerFrameStats {
     std::uint32_t projected_splats = 0;
@@ -57,6 +58,8 @@ public:
     void bind_to_device_uuid(const std::array<unsigned char, 16>& uuid);
 
     [[nodiscard]] RasterizerFrameStats last_stats() const;
+    void set_tunables(const RasterizerTunables& tunables);
+    [[nodiscard]] RasterizerTunables tunables() const;
 
 private:
     std::unique_ptr<RasterizerImpl> impl_;
@@ -70,6 +73,8 @@ struct RasterizerTunables {
     float density_clamp  = 100.0f; // numerical safety for tiny scales
     int   max_radii_pixels = 256;  // skip pathologically large gaussians
     int   max_splats_per_tile = 1024; // M0 fixed-capacity deterministic tile lists
+                                      // Ignored when use_compact_tile_lists is true.
+    bool  use_compact_tile_lists = false; // count/scan/scatter tile-list path
     bool  use_anti_aliased_filter = true; // Mip-Splatting style filter
 };
 

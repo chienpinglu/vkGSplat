@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -68,6 +69,17 @@ float half_to_float(std::uint16_t bits) {
     float value = 0.0f;
     std::memcpy(&value, &out, sizeof(value));
     return value;
+}
+
+template <typename Fn>
+bool expect_runtime_error(const char* label, Fn fn) {
+    try {
+        fn();
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    std::fprintf(stderr, "%s did not reject invalid launch\n", label);
+    return false;
 }
 
 vkgsplat::Gaussian make_gaussian(vkgsplat::float3 position,
@@ -217,6 +229,27 @@ int main() {
     };
 
     renderer->upload(scene);
+    const auto default_tunables = cuda_renderer->tunables();
+
+    auto invalid_tile_tunables = default_tunables;
+    invalid_tile_tunables.tile_size = 33;
+    cuda_renderer->set_tunables(invalid_tile_tunables);
+    if (!expect_runtime_error("CUDA rasterizer oversized tile", [&] {
+            renderer->render(camera, params, target);
+        })) {
+        return 1;
+    }
+
+    auto invalid_capacity_tunables = default_tunables;
+    invalid_capacity_tunables.max_splats_per_tile = 0;
+    cuda_renderer->set_tunables(invalid_capacity_tunables);
+    if (!expect_runtime_error("CUDA rasterizer zero tile capacity", [&] {
+            renderer->render(camera, params, target);
+        })) {
+        return 1;
+    }
+
+    cuda_renderer->set_tunables(default_tunables);
     const FrameId frame = renderer->render(camera, params, target);
     renderer->wait(frame);
 
@@ -250,6 +283,42 @@ int main() {
                      center.x, center.y, center.z, center.w);
         return 1;
     }
+
+    auto compact_tunables = default_tunables;
+    compact_tunables.use_compact_tile_lists = true;
+    compact_tunables.max_splats_per_tile = 0; // compact path is not capped by fixed tile buckets
+    cuda_renderer->set_tunables(compact_tunables);
+    std::vector<vkgsplat::float4> compact_pixels(16 * 16, { 1.0f, 1.0f, 1.0f, 1.0f });
+    const RenderTarget compact_target{
+        RenderTargetKind::HOST_BUFFER,
+        { 16, 16, PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
+        compact_pixels.data(),
+    };
+    const FrameId compact_frame = renderer->render(camera, params, compact_target);
+    renderer->wait(compact_frame);
+    const auto compact_stats = cuda_renderer->last_stats();
+    if (compact_stats.projected_splats != 2u || compact_stats.tile_splat_entries != 2u ||
+        compact_stats.tile_splat_overflow != 0u || compact_stats.max_tile_splats != 2u) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer compact tile stats mismatch: projected=%u entries=%u overflow=%u max=%u\n",
+                     compact_stats.projected_splats,
+                     compact_stats.tile_splat_entries,
+                     compact_stats.tile_splat_overflow,
+                     compact_stats.max_tile_splats);
+        return 1;
+    }
+    const vkgsplat::float4 compact_center = compact_pixels[8 * 16 + 8];
+    if (!near(compact_center.x, center.x, 1.0e-4f) ||
+        !near(compact_center.y, center.y, 1.0e-4f) ||
+        !near(compact_center.z, center.z, 1.0e-4f) ||
+        !near(compact_center.w, center.w, 1.0e-4f)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer compact tile output mismatch: compact=(%.4f %.4f %.4f %.4f) fixed=(%.4f %.4f %.4f %.4f)\n",
+                     compact_center.x, compact_center.y, compact_center.z, compact_center.w,
+                     center.x, center.y, center.z, center.w);
+        return 1;
+    }
+    cuda_renderer->set_tunables(default_tunables);
 
     RenderParams preserve_params = params;
     preserve_params.clear_to_background = false;
@@ -435,6 +504,50 @@ int main() {
         { 16, 16, PixelFormat::R8G8B8A8_UNORM, 1, 1 },
         reinterpret_cast<void*>(static_cast<std::uintptr_t>(surface)),
     };
+    renderer->upload(empty_scene);
+    const FrameId empty_frame_surface = renderer->render(camera, empty_params, target_surface);
+    renderer->wait(empty_frame_surface);
+
+    std::vector<uchar4> empty_surface_pixels(16 * 16);
+    CHECK_CUDA(cudaMemcpy2DFromArray(empty_surface_pixels.data(),
+                                     16 * sizeof(uchar4),
+                                     surface_array,
+                                     0,
+                                     0,
+                                     16 * sizeof(uchar4),
+                                     16,
+                                     cudaMemcpyDeviceToHost));
+    const uchar4 empty_surface_corner = empty_surface_pixels[0];
+    if (!near_u8(empty_surface_corner.x, 32u, 1) ||
+        !near_u8(empty_surface_corner.y, 64u, 1) ||
+        !near_u8(empty_surface_corner.z, 128u, 1) ||
+        !near_u8(empty_surface_corner.w, 0u, 1)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty INTEROP_IMAGE clear mismatch: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(empty_surface_corner.x),
+                     static_cast<unsigned>(empty_surface_corner.y),
+                     static_cast<unsigned>(empty_surface_corner.z),
+                     static_cast<unsigned>(empty_surface_corner.w));
+        return 1;
+    }
+    const auto empty_surface_stats = cuda_renderer->last_stats();
+    if (empty_surface_stats.projected_splats != 0u ||
+        empty_surface_stats.nonempty_tiles != 0u ||
+        empty_surface_stats.tile_splat_entries != 0u ||
+        empty_surface_stats.tile_splat_overflow != 0u ||
+        empty_surface_stats.max_tile_splats != 0u) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer empty surface stats mismatch: projected=%u nonempty=%u entries=%u overflow=%u max=%u\n",
+                     empty_surface_stats.projected_splats,
+                     empty_surface_stats.nonempty_tiles,
+                     empty_surface_stats.tile_splat_entries,
+                     empty_surface_stats.tile_splat_overflow,
+                     empty_surface_stats.max_tile_splats);
+        return 1;
+    }
+
+    renderer->upload(scene);
+
     const FrameId frame_surface = renderer->render(camera, params, target_surface);
     renderer->wait(frame_surface);
 
@@ -447,9 +560,6 @@ int main() {
                                      16 * sizeof(uchar4),
                                      16,
                                      cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaDestroySurfaceObject(surface));
-    CHECK_CUDA(cudaFreeArray(surface_array));
-
     const uchar4 surface_corner = surface_pixels[0];
     if (surface_corner.x != 0 || surface_corner.y != 0 ||
         surface_corner.z != 0 || surface_corner.w != 0) {
@@ -479,6 +589,68 @@ int main() {
                      static_cast<unsigned>(pixels_u8[center_u8 + 3]));
         return 1;
     }
+
+    std::vector<uchar4> preserve_surface_seed(16 * 16);
+    for (auto& p : preserve_surface_seed) {
+        p = make_uchar4(32u, 64u, 128u, 127u);
+    }
+    CHECK_CUDA(cudaMemcpy2DToArray(surface_array,
+                                   0,
+                                   0,
+                                   preserve_surface_seed.data(),
+                                   16 * sizeof(uchar4),
+                                   16 * sizeof(uchar4),
+                                   16,
+                                   cudaMemcpyHostToDevice));
+
+    const FrameId preserve_frame_surface =
+        renderer->render(camera, preserve_params, target_surface);
+    renderer->wait(preserve_frame_surface);
+
+    std::vector<uchar4> preserve_surface_pixels(16 * 16);
+    CHECK_CUDA(cudaMemcpy2DFromArray(preserve_surface_pixels.data(),
+                                     16 * sizeof(uchar4),
+                                     surface_array,
+                                     0,
+                                     0,
+                                     16 * sizeof(uchar4),
+                                     16,
+                                     cudaMemcpyDeviceToHost));
+
+    const uchar4 preserve_surface_corner = preserve_surface_pixels[0];
+    if (!near_u8(preserve_surface_corner.x, 32u) ||
+        !near_u8(preserve_surface_corner.y, 64u) ||
+        !near_u8(preserve_surface_corner.z, 128u) ||
+        !near_u8(preserve_surface_corner.w, 127u)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer INTEROP_IMAGE preserve-mode corner mismatch: corner=(%u %u %u %u)\n",
+                     static_cast<unsigned>(preserve_surface_corner.x),
+                     static_cast<unsigned>(preserve_surface_corner.y),
+                     static_cast<unsigned>(preserve_surface_corner.z),
+                     static_cast<unsigned>(preserve_surface_corner.w));
+        return 1;
+    }
+
+    const uchar4 preserve_surface_center = preserve_surface_pixels[8 * 16 + 8];
+    if (!near_u8(preserve_surface_center.x, preserve_pixels_u8[center_u8 + 0], 2) ||
+        !near_u8(preserve_surface_center.y, preserve_pixels_u8[center_u8 + 1], 2) ||
+        !near_u8(preserve_surface_center.z, preserve_pixels_u8[center_u8 + 2], 2) ||
+        !near_u8(preserve_surface_center.w, preserve_pixels_u8[center_u8 + 3], 2)) {
+        std::fprintf(stderr,
+                     "CUDA rasterizer INTEROP_IMAGE preserve-mode center mismatch: surface=(%u %u %u %u) host=(%u %u %u %u)\n",
+                     static_cast<unsigned>(preserve_surface_center.x),
+                     static_cast<unsigned>(preserve_surface_center.y),
+                     static_cast<unsigned>(preserve_surface_center.z),
+                     static_cast<unsigned>(preserve_surface_center.w),
+                     static_cast<unsigned>(preserve_pixels_u8[center_u8 + 0]),
+                     static_cast<unsigned>(preserve_pixels_u8[center_u8 + 1]),
+                     static_cast<unsigned>(preserve_pixels_u8[center_u8 + 2]),
+                     static_cast<unsigned>(preserve_pixels_u8[center_u8 + 3]));
+        return 1;
+    }
+
+    CHECK_CUDA(cudaDestroySurfaceObject(surface));
+    CHECK_CUDA(cudaFreeArray(surface_array));
 
     return 0;
 }
