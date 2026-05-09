@@ -127,6 +127,16 @@ cache records `CMAKE_CUDA_COMPILER-NOTFOUND`.
 On an NVIDIA CUDA workstation, use the RTX 5090 bring-up plan:
 `docs/rtx5090_workstation_test_plan.md`. The CUDA gate currently includes:
 
+```bash
+scripts/run_rtx5090_cuda_smoke.sh
+```
+
+On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_rtx5090_cuda_smoke.ps1
+```
+
 - `test_cuda_tile_renderer`: validates the tile blend kernel on a tiny
   projected-splat fixture, float-buffer output, RGBA8 CUDA-surface output,
   surface preserve mode, and invalid launch rejection for oversized tiles,
@@ -144,13 +154,15 @@ On an NVIDIA CUDA workstation, use the RTX 5090 bring-up plan:
 
 The CUDA rasterizer now has an opt-in M1 count/scan/scatter tile-list path via
 `RasterizerTunables::use_compact_tile_lists`. In compact mode the renderer no
-longer depends on `max_splats_per_tile`; the fixed-capacity M0 path remains
-available for fallback and comparison until CUDA workstation validation passes.
-The next CUDA renderer milestone is replacing the M1 serial prefix/sort pieces
-with production CUB/Thrust or custom parallel primitives and making compact tile
-lists the default. The native Vulkan hardware gate remains separate: run the
-Wicked/NVIDIA smoke test on a Linux or Windows NVIDIA Vulkan stack, then run the
-CUDA gates, then run CUDA+Vulkan interop once both sides independently pass.
+longer depends on `max_splats_per_tile`; it uses CUB exclusive scan for tile
+offsets and retains a correctness-first tile-local insertion sort. The
+fixed-capacity M0 path remains available for fallback and comparison until CUDA
+workstation validation passes. The next CUDA renderer milestone is replacing
+tile-local insertion sorting with production radix/cooperative sorting and
+making compact tile lists the default. The native Vulkan hardware gate remains
+separate: run the Wicked/NVIDIA smoke test on a Linux or Windows NVIDIA Vulkan
+stack, then run the CUDA gates, then run CUDA+Vulkan interop once both sides
+independently pass.
 
 ## Wicked Engine on NVIDIA Vulkan
 

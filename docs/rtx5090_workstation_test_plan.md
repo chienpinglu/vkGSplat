@@ -274,8 +274,24 @@ Build the CUDA path with Blackwell architecture enabled. The project will add
 SM 12.0 automatically for CUDA 12.8+, but pass it explicitly during first
 bring-up so the log is unambiguous. This phase validates the software-renderer
 CUDA path without Vulkan interop: projected-splat preprocessing, deterministic
-device tile-list/range construction, tile blending, and tensorized
-reconstruction kernels.
+fixed tile-list construction, opt-in CUB-scanned compact tile lists, tile
+blending, and tensorized reconstruction kernels.
+
+The shortest path is the repo script:
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_rtx5090_cuda_smoke.ps1
+```
+
+Linux shell:
+
+```bash
+scripts/run_rtx5090_cuda_smoke.sh
+```
+
+The expanded commands are below for debugging or custom build directories.
 
 Windows PowerShell:
 
@@ -342,16 +358,16 @@ Important M0 limitation:
 - The CUDA rasterizer still keeps the fixed-capacity deterministic per-tile
   list (`max_splats_per_tile`) as the M0 fallback. It also exposes an opt-in M1
   count/scan/scatter path through `RasterizerTunables::use_compact_tile_lists`:
-  count each projected splat's tile intersections, prefix-sum tile counts,
-  scatter duplicated splat IDs into compact tile spans, then order each tile
-  before blending. The smoke test should exercise this compact path with
+  count each projected splat's tile intersections, run a CUB exclusive scan over
+  tile counts, scatter duplicated splat IDs into compact tile spans, then order
+  each tile before blending. The smoke test should exercise this compact path with
   `max_splats_per_tile=0` to show it is independent of fixed-list capacity.
-- The M1 compact path is still correctness-first: it uses a simple device prefix
-  pass plus per-tile insertion sorting and includes a small host readback for the
-  compact entry count. The next renderer implementation milestone is replacing
-  those pieces with production CUB/Thrust or custom parallel primitives and then
-  making compact tile lists the default. Do not treat timings from either M0 or
-  M1 as representative of production performance yet.
+- The M1 compact path is still correctness-first: it keeps per-tile insertion
+  sorting and includes a small host readback for the compact entry count. The
+  next renderer implementation milestone is replacing tile-local insertion sort
+  with production radix/cooperative sorting and then making compact tile lists
+  the default. Do not treat timings from either M0 or M1 as representative of
+  production performance yet.
 
 ## Phase 6: CUDA + Vulkan Interop Probe
 

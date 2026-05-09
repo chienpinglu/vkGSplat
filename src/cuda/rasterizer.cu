@@ -9,22 +9,23 @@
 //   sort_pairs          production target: radix-sort
 //                       (key,value) = (depth|tile_id, gaussian_id).
 //   identify_ranges     production target: scan to find each tile's
-//                       (start,end) span. M1 currently uses a correctness-first
-//                       count/scan/scatter path; production will replace the
-//                       serial scan and tile-local sort with parallel
-//                       CUB/Thrust or custom primitives.
+//                       (start,end) span. M1 currently uses count/scatter
+//                       kernels with a CUB exclusive scan; production will
+//                       replace tile-local insertion sorting with radix or
+//                       cooperative tile sorting.
 //   blend_kernel        per-tile, per-pixel front-to-back alpha blend.
 //
 // The implementation is being moved stage-by-stage from a host oracle
 // to CUDA. The tile compositor is device-side; preprocessing is now a
 // real device kernel; tile-list construction has an M0 deterministic
-// device path with fixed per-tile capacity. The production path will
-// replace it with count/scan/scatter and depth-key sorting.
+// device path with fixed per-tile capacity and an M1 compact path with
+// CUB-scanned tile offsets. The next production step is depth-key sorting.
 
 #include "vkgsplat/cuda/rasterizer.h"
 #include "vkgsplat/cuda/tile_renderer.h"
 #include "vkgsplat/tile_raster.h"
 
+#include <cub/cub.cuh>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -534,19 +535,6 @@ __global__ void count_compact_tile_entries_kernel(int num_gaussians,
     }
 }
 
-__global__ void build_compact_tile_offsets_kernel(std::uint32_t tile_count,
-                                                  const std::uint32_t* __restrict__ tile_counts,
-                                                  std::uint32_t* __restrict__ tile_offsets) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-
-    std::uint32_t sum = 0;
-    tile_offsets[0] = 0;
-    for (std::uint32_t i = 0; i < tile_count; ++i) {
-        sum += tile_counts[i];
-        tile_offsets[i + 1u] = sum;
-    }
-}
-
 __global__ void scatter_compact_tile_entries_kernel(int num_gaussians,
                                                     const PreprocessedGaussian* __restrict__ preprocessed,
                                                     std::uint32_t* __restrict__ sorted_projected_indices,
@@ -722,6 +710,7 @@ public:
         if (tile_counts_dev_) cudaFree(tile_counts_dev_);
         if (tile_offsets_dev_) cudaFree(tile_offsets_dev_);
         if (tile_write_counts_dev_) cudaFree(tile_write_counts_dev_);
+        if (compact_scan_temp_dev_) cudaFree(compact_scan_temp_dev_);
         if (stats_dev_) cudaFree(stats_dev_);
         if (output_dev_) cudaFree(output_dev_);
         if (output_rgba8_dev_) cudaFree(output_rgba8_dev_);
@@ -817,6 +806,9 @@ public:
         if (tile_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
             throw std::runtime_error("cuda::Rasterizer: tile count exceeds uint32 offsets");
         }
+        if (tile_count + 1u > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("cuda::Rasterizer: compact scan dimensions exceed int range");
+        }
         if (gaussian_count_ > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
             desc.width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
             desc.height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
@@ -866,7 +858,7 @@ public:
             ensure_compact_tile_aux_capacity(tile_count);
             VKGSPLAT_CUDA_CHECK(cudaMemsetAsync(tile_counts_dev_,
                                                 0,
-                                                sizeof(std::uint32_t) * tile_count,
+                                                sizeof(std::uint32_t) * (tile_count + 1u),
                                                 stream_));
             count_compact_tile_entries_kernel<<<blocks, threads, 0, stream_>>>(
                 static_cast<int>(gaussian_count_),
@@ -877,9 +869,15 @@ public:
             VKGSPLAT_CUDA_CHECK(cudaGetLastError());
 
             const auto tile_count_u32 = static_cast<std::uint32_t>(tile_count);
-            build_compact_tile_offsets_kernel<<<1, 1, 0, stream_>>>(
-                tile_count_u32, tile_counts_dev_, tile_offsets_dev_);
-            VKGSPLAT_CUDA_CHECK(cudaGetLastError());
+            const int scan_items = static_cast<int>(tile_count + 1u);
+            ensure_compact_scan_temp_capacity(scan_items);
+            VKGSPLAT_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                compact_scan_temp_dev_,
+                compact_scan_temp_capacity_bytes_,
+                tile_counts_dev_,
+                tile_offsets_dev_,
+                scan_items,
+                stream_));
 
             std::uint32_t compact_index_count = 0;
             VKGSPLAT_CUDA_CHECK(cudaMemcpyAsync(&compact_index_count,
@@ -1011,7 +1009,7 @@ private:
             if (tile_counts_dev_) cudaFree(tile_counts_dev_);
             if (tile_write_counts_dev_) cudaFree(tile_write_counts_dev_);
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_counts_dev_,
-                                          sizeof(std::uint32_t) * tile_count));
+                                          sizeof(std::uint32_t) * (tile_count + 1u)));
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_write_counts_dev_,
                                           sizeof(std::uint32_t) * tile_count));
             compact_tile_capacity_ = tile_count;
@@ -1022,6 +1020,22 @@ private:
             VKGSPLAT_CUDA_CHECK(cudaMalloc(&tile_offsets_dev_,
                                           sizeof(std::uint32_t) * offset_count));
             compact_tile_offset_capacity_ = offset_count;
+        }
+    }
+
+    void ensure_compact_scan_temp_capacity(int scan_items) {
+        std::size_t required_bytes = 0;
+        VKGSPLAT_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            required_bytes,
+            tile_counts_dev_,
+            tile_offsets_dev_,
+            scan_items,
+            stream_));
+        if (required_bytes > compact_scan_temp_capacity_bytes_) {
+            if (compact_scan_temp_dev_) cudaFree(compact_scan_temp_dev_);
+            VKGSPLAT_CUDA_CHECK(cudaMalloc(&compact_scan_temp_dev_, required_bytes));
+            compact_scan_temp_capacity_bytes_ = required_bytes;
         }
     }
 
@@ -1223,6 +1237,7 @@ private:
     std::uint32_t*        tile_counts_dev_     = nullptr;
     std::uint32_t*        tile_offsets_dev_    = nullptr;
     std::uint32_t*        tile_write_counts_dev_ = nullptr;
+    void*                 compact_scan_temp_dev_ = nullptr;
     RasterizerFrameStats*  stats_dev_           = nullptr;
     float4*               output_dev_          = nullptr;
     void*                 output_rgba8_dev_    = nullptr;
@@ -1232,6 +1247,7 @@ private:
     std::size_t           tile_range_capacity_ = 0;
     std::size_t           compact_tile_capacity_ = 0;
     std::size_t           compact_tile_offset_capacity_ = 0;
+    std::size_t           compact_scan_temp_capacity_bytes_ = 0;
     std::size_t           output_capacity_     = 0;
     std::size_t           output_rgba8_capacity_bytes_ = 0;
     std::size_t           output_rgba16_capacity_bytes_ = 0;
