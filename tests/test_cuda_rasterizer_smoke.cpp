@@ -89,7 +89,7 @@ int main() {
     RenderParams params;
     params.background = { 0.0f, 0.0f, 0.0f };
 
-    std::vector<float4> pixels(16 * 16, { 1.0f, 1.0f, 1.0f, 1.0f });
+    std::vector<vkgsplat::float4> pixels(16 * 16, { 1.0f, 1.0f, 1.0f, 1.0f });
     const RenderTarget target{
         RenderTargetKind::HOST_BUFFER,
         { 16, 16, PixelFormat::R32G32B32A32_SFLOAT, 1, 1 },
@@ -100,7 +100,7 @@ int main() {
     const FrameId frame = renderer->render(camera, params, target);
     renderer->wait(frame);
 
-    const float4 corner = pixels[0];
+    const vkgsplat::float4 corner = pixels[0];
     if (!near(corner.x, 0.0f) || !near(corner.y, 0.0f) ||
         !near(corner.z, 0.0f) || !near(corner.w, 0.0f)) {
         std::fprintf(stderr,
@@ -109,7 +109,7 @@ int main() {
         return 1;
     }
 
-    const float4 center = pixels[8 * 16 + 8];
+    const vkgsplat::float4 center = pixels[8 * 16 + 8];
     if (!(center.x > 0.35f && center.z > 0.05f && center.x > center.z)) {
         std::fprintf(stderr,
                      "CUDA rasterizer did not blend near red over far blue: center=(%.4f %.4f %.4f %.4f)\n",
