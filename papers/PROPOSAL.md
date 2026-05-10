@@ -48,7 +48,7 @@ a learned model rather than a human eye — this trade is straightforward.
    Filament, RenderDoc, NSight all speak Vulkan. Reusing the API gives
    the project the entire graphics tooling ecosystem for free.
 
-## Architecture (3 layers)
+## Architecture (4 layers)
 
 1. **Vulkan front-end** — loadable ICD; conformance-targeted subset
    of Vulkan 1.3 + ray-tracing + external-memory; apps need no changes.
@@ -56,6 +56,9 @@ a learned model rather than a human eye — this trade is straightforward.
    record-and-replay; backend-agnostic.
 3. **Compute backend** — CUDA reference; Triton / SYCL portable;
    eventually XLA HLO (TPU), NeuronCore (Trainium).
+4. **World-State IR** — internal, device-resident semantic state:
+   seed buffers, primitive/material IDs, motion, lighting, sensors,
+   uncertainty, Gaussian/radiance history, and refresh provenance.
 
 ## v1 plan: standard Vulkan first, 3DGS reconstruction behind it
 
@@ -63,7 +66,10 @@ Do not ask applications to adopt an extended Vulkan dialect or a custom Gaussian
 submission standard. Vulkan is the application and acquisition contract. The v1
 path captures or ingests ordinary Vulkan-shaped seed buffers, lowers selected
 raster and ray-tracing work to CUDA software kernels where useful, and uses 3DGS
-as an internal reconstruction/state layer behind that boundary.
+as an internal reconstruction/state layer behind that boundary. The positive
+semantic layer is the **World-State IR**, not a new Vulkan API: it is the private
+state that connects acquisition facts, physics/sensor metadata, Gaussian
+history, uncertainty, and training feedback.
 
 3DGS remains useful because it is compute-native and gives the system an
 explicit scene/radiance memory for denoising, temporal reuse, supersampling, and
