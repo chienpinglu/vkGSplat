@@ -57,17 +57,18 @@ a learned model rather than a human eye — this trade is straightforward.
 3. **Compute backend** — CUDA reference; Triton / SYCL portable;
    eventually XLA HLO (TPU), NeuronCore (Trainium).
 
-## v1 plan: 3DGS first
+## v1 plan: standard Vulkan first, 3DGS reconstruction behind it
 
-Ship a working 3D Gaussian Splatting backend before tackling raster /
-RT lowering. 3DGS is already compute-native — no fixed-function pipeline
-required — and it lets the system be useful immediately for the natural
-SDG flow: capture real environments with a phone, splat them, render
-training data inside them with controlled randomization.
+Do not ask applications to adopt an extended Vulkan dialect or a custom Gaussian
+submission standard. Vulkan is the application and acquisition contract. The v1
+path captures or ingests ordinary Vulkan-shaped seed buffers, lowers selected
+raster and ray-tracing work to CUDA software kernels where useful, and uses 3DGS
+as an internal reconstruction/state layer behind that boundary.
 
-A non-standard `VK_VKGSPLAT_gaussian_splatting` extension lets apps
-submit Gaussians directly. Classical raster and RT lowering follow as
-v2 / v3.
+3DGS remains useful because it is compute-native and gives the system an
+explicit scene/radiance memory for denoising, temporal reuse, supersampling, and
+frame interpolation. But direct Gaussian submission is an implementation
+experiment, not the standard-facing product.
 
 ## What this is *not*
 

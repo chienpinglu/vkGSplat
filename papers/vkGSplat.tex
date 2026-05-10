@@ -83,19 +83,21 @@ such as Genie and Cosmos are compatible with, rather than replacements for,
 calibrated physics and sensors when they act as priors, rollout generators, or
 proposal mechanisms~\cite{ha2018,bruce2024,deepmind2024genie2,nvidia2024cosmos}.
 We use \textbf{vkGSplat} as the reference implementation of this philosophy. The
-name is intentional: \textbf{vk} means the system preserves Vulkan as the
-application contract while supporting a CUDA software execution path, and
-\textbf{GSplat} means 3D Gaussian Splatting becomes the open reconstruction
-layer that replaces the architectural role of proprietary DLSS for SDG. The
-architecture is acquisition-backend neutral: a conventional Vulkan renderer on
-graphics hardware is a valid and often best acquisition oracle. vkGSplat adds a
-compute-first Vulkan path that preserves the API as a portable application
-contract while lowering visual acquisition and reconstruction to CUDA-class
-kernels. The CUDA software path is useful when data generation, reconstruction,
-training, and world-model inference should remain on tensor-rich accelerators,
-or when the renderer must expose custom sample statistics and explicit Gaussian
-state updates. vkGSplat is not the whole thesis; it is the concrete test of
-whether physical-evidence acquisition, explicit Gaussian state, PyTorch-centered
+name is intentional: \textbf{vk} means the system embraces standard Vulkan as the
+application and acquisition contract, and \textbf{GSplat} means 3D Gaussian
+Splatting becomes the open reconstruction layer that replaces the architectural
+role of proprietary DLSS for SDG. This is not a proposal for a new graphics API,
+a semantic extension of Vulkan, or a replacement standard. The architecture is
+acquisition-backend neutral: a conventional Vulkan renderer on graphics hardware
+is a valid and often best acquisition oracle. vkGSplat instead asks how much of
+the work behind the existing Vulkan contract can be lowered to CUDA-class
+software kernels and persistent Gaussian state when data generation,
+reconstruction, training, and world-model inference should remain on tensor-rich
+accelerators. The CUDA software path is useful when the renderer must expose
+custom sample statistics and explicit Gaussian state updates, but those are
+implementation artifacts behind the standard contract, not new application
+semantics. vkGSplat is not the whole thesis; it is the concrete test of whether
+physical-evidence acquisition, explicit Gaussian state, PyTorch-centered
 orchestration, and tensor-rich hardware can form a practical data-generation
 substrate. As a falsifiable milestone rather than a reported result, we target
 \textbf{$\geq 100$ images\slash s\slash H100} at $1024{\times}1024$ from a
@@ -272,15 +274,19 @@ seed-buffer and explicit-state reconstruction stack can also live inside
 CUDA/PyTorch on the AI cluster.
 
 \textbf{vkGSplat} is the concrete reference implementation for this broader
-architecture. It preserves Vulkan as an application boundary, treats hardware
-Vulkan output as a first-class acquisition source, and adds a CUDA software path
-for seed generation and reconstruction when the pipeline benefits from AI-compute
-co-location. It also explores persistent 3D/4D Gaussian state as an explicit
-memory for physical evidence. The name carries the system boundary: \emph{vk}
-denotes Vulkan compatibility through a CUDA software path, while \emph{GSplat}
-denotes 3D Gaussian Splatting as the open DLSS-class integration layer for
-denoising, temporal reuse, super-resolution, frame interpolation, and radiance
-state. The paper therefore has two layers. The first is the philosophy:
+architecture. It preserves standard Vulkan as the application boundary, treats
+hardware Vulkan output as a first-class acquisition source, and adds a CUDA
+software path for seed generation and reconstruction when the pipeline benefits
+from AI-compute co-location. It does not ask applications, engines, or tools to
+adopt an ``extended Vulkan'' semantic layer. The standard world is a feature:
+once visual acquisition is expressed as compute, vkGSplat can embrace Vulkan
+as-is and move implementation freedom behind the API boundary. It also explores
+persistent 3D/4D Gaussian state as an explicit memory for physical evidence. The
+name carries the system boundary: \emph{vk} denotes standard Vulkan
+compatibility through a CUDA software path, while \emph{GSplat} denotes 3D
+Gaussian Splatting as the open DLSS-class integration layer for denoising,
+temporal reuse, super-resolution, frame interpolation, and radiance state. The
+paper therefore has two layers. The first is the philosophy:
 Physical AI data generation should combine calibrated acquisition, explicit
 state, learned reconstruction, and uncertainty-gated oracle refresh. The second
 is the system: vkGSplat tests whether this philosophy can be implemented as a
@@ -366,14 +372,16 @@ generation, with \textbf{vkGSplat} as the reference system. We make ten claims:
     and refresh events rather than per-frame renderer obligations
     (Section~\ref{sec:world-building-lifecycle}).
 
-    \item \textbf{Reference implementation.} vkGSplat preserves Vulkan as the
-    application contract, accepts hardware Vulkan as a valid acquisition path,
-    and adds a compute-first software acquisition and reconstruction backend.
-    Its name summarizes the bet: \emph{vk} is Vulkan preserved through CUDA
-    software execution, and \emph{GSplat} is 3DGS replacing DLSS's architectural
-    role as an open reconstruction layer. The point is not merely software
-    rendering, but an explicit bridge between physical evidence, Gaussian
-    state, and tensor-side reconstruction
+    \item \textbf{Reference implementation.} vkGSplat preserves standard
+    Vulkan as the application contract, accepts hardware Vulkan as a valid
+    acquisition path, and adds a compute-first software acquisition and
+    reconstruction backend. It is not an extended Vulkan dialect, not a semantic
+    extension, and not a new standard. Its name summarizes the bet: \emph{vk} is Vulkan
+    embraced as-is while selected work is executed through CUDA software, and
+    \emph{GSplat} is 3DGS replacing DLSS's architectural role as an open
+    reconstruction layer. The point is not merely software rendering, but an
+    explicit bridge between physical evidence, Gaussian state, and tensor-side
+    reconstruction
     (Section~\ref{sec:design}).
 
     \item \textbf{Ray-tracing seed path before 3DGS.}
@@ -1552,14 +1560,16 @@ Physical AI token/data demand & Omdia positions Physical AI as a later wave that
 \end{table}
 
 This argument also explains why vkGSplat keeps Vulkan as the front-end contract.
-The goal is not to discard graphics semantics; it is to make those semantics
-deployable where the economic gravity already sits. A Vulkan-compatible
-acquisition contract lets existing assets and rendering abstractions survive,
-while the backend can be lowered to CUDA kernels, tensorized reconstruction,
-or eventually other AI-accelerator runtimes. If a site has abundant RTX or L40
+The goal is not to discard, reinterpret, or extend graphics semantics. It is to
+make the existing Vulkan contract deployable where the economic gravity already
+sits. A standard Vulkan acquisition boundary lets existing assets, engines,
+tools, and rendering abstractions survive, while the implementation behind that
+boundary can be lowered to CUDA kernels, tensorized reconstruction, or
+eventually other AI-accelerator runtimes. If a site has abundant RTX or L40
 hardware, hardware Vulkan remains the natural acquisition backend. If the site
 has a large H100/B200/TPU/Trainium-style fleet and a hard time creating a new
-graphics island, vkGSplat makes SDG a software workload on the AI platform.
+graphics island, vkGSplat makes SDG a software workload on the AI platform
+without asking the ecosystem to adopt a new API.
 
 A back-of-envelope energy budget reinforces the argument. At a 50-ms
 target image budget on an 80\% utilized H100 (700~W TDP), the
@@ -1587,7 +1597,8 @@ vkGSplat's software-CUDA branch is structured as three layers
 hardware Vulkan renderer is a sibling branch: it may run the normal graphics
 pipeline and export the same seed-buffer ABI to the PyTorch/vkGSplat
 reconstruction stack. The figure therefore describes the distinctive vkGSplat
-implementation path, not the only valid acquisition path.
+implementation path, not a new Vulkan-derived standard and not the only valid
+acquisition path.
 
 \begin{figure}[t]
 \centering
@@ -1607,8 +1618,8 @@ implementation path, not the only valid acquisition path.
 
 % --- layer 1: front-end ---
 \node[box, fill=blue!8, below=0.55cm of apps] (vk) {%
-    \textbf{Vulkan front-end (ICD)}\\
-    \scriptsize subset of Vulkan 1.3 + RT + external memory
+    \textbf{Standard Vulkan-facing front-end}\\
+    \scriptsize Vulkan 1.3 workload + RT/external-memory features
 };
 
 % --- layer 2: IR ---
@@ -1655,7 +1666,8 @@ implementation path, not the only valid acquisition path.
 
 \end{tikzpicture}
 \caption{vkGSplat architecture. Applications retain the standard Vulkan
-API; the implementation lowers SPIR-V and command buffers to a
+API; vkGSplat does not introduce an extended Vulkan dialect or a new semantic layer. The
+implementation lowers SPIR-V and command buffers to a
 backend-agnostic compute IR (LLVM\,/\,MLIR), which is dispatched to
 CUDA, Triton\,/\,SYCL, or AI-accelerator-native backends. The
 rendering kernels --- 3DGS rasterizer, software tile rasterizer,
@@ -1667,15 +1679,16 @@ same seed-buffer contract.}
 \end{figure}
 
 \begin{enumerate}
-    \item \textbf{Vulkan front-end.} A Vulkan loadable ICD that
-    implements a \emph{conformance-targeted subset} of Vulkan~1.3 plus
-    selected ray-tracing and external-memory extensions. Mesh shaders
-    are treated as the preferred programmable primitive-expansion path
-    for Gaussian splats. Tessellation and geometry shaders are not in
-    the v1 target: their useful role in this system, expanding compact
-    primitives into screen-space work, is subsumed by mesh shaders and
-    then by the tile-based software backend. Applications link the
-    standard Vulkan loader and need no modification.
+    \item \textbf{Vulkan-facing acquisition boundary.} Applications link the
+    standard Vulkan loader and need no modification. The implementation target
+    is a compatibility profile of existing Vulkan~1.3 workloads plus selected
+    ray-tracing and external-memory features, not a semantic extension of
+    Vulkan. Mesh shaders are useful when existing workloads use them as a
+    programmable primitive-expansion path; otherwise vkGSplat consumes ordinary
+    raster, ray-tracing, compute, and external-memory contracts as they already
+    exist. Tessellation and geometry shaders are not in the first software
+    target because SDG does not need them for the initial seed-buffer path, not
+    because the API is being redefined.
 
     \item \textbf{Intermediate representation (IR).} SPIR-V shaders and
     Vulkan command buffers are lowered into a backend-agnostic compute
@@ -1851,14 +1864,18 @@ physical evidence.
 
 \subsection{Vulkan front-end}
 
-We target a deliberate \emph{subset}: graphics pipelines, compute
-pipelines, command buffers, descriptor sets, mesh shaders, indirect
-dispatch/draw for GPU-driven splat counts, swapchain (optional, for
-debug viewer), timeline semaphores, and external memory. We initially
-omit tessellation shaders, geometry shaders, sparse binding, and
-presentation-engine optimization. SDG does not need them, and for
-Gaussian splatting the tessellation/geometry stages are a worse fit
-than mesh shaders followed by tile-local software shading.
+The front-end target is deliberately conservative: consume ordinary Vulkan
+workloads and choose which existing features the software backend implements
+first. That initial compatibility profile includes graphics pipelines, compute
+pipelines, command buffers, descriptor sets, mesh shaders where present,
+indirect dispatch/draw for GPU-driven counts, optional swapchain support for a
+debug viewer, timeline semaphores, and external memory. This is an adoption
+strategy, not a standards strategy. We initially omit tessellation shaders,
+geometry shaders, sparse binding, and presentation-engine optimization because
+SDG seed-buffer acquisition does not need them. If a hardware Vulkan renderer is
+available, it may still execute those stages and export the same captured
+buffers. vkGSplat gains leverage by accepting the standard API surface and
+moving only the selected implementation path onto CUDA/tensor hardware.
 
 \subsection{Lowering rasterization}
 
@@ -1901,35 +1918,36 @@ considered. The acquisition policy should first reduce samples per pixel and
 seed resolution, then spend extra samples adaptively where variance, missing
 path-depth support, or sensor confidence says the Gaussian history is weak.
 
-\subsection{Paused optional 3DGS fast path}\label{sec:v1}
+\subsection{Implementation-only 3DGS fast path}\label{sec:v1}
 
-The project previously exposed a non-standard Vulkan extension
-(\texttt{VK\_VKGSPLAT\_gaussian\_splatting}) that lets applications submit
-Gaussian primitives directly. Internally, this dispatches to a
-3DGS rasterizer akin to the GraphDECO CUDA rasterizer released with
-3DGS~\cite{kerbl20233dgs}, but extended for offline SDG (deterministic
-ordering, deeper sample budgets per pixel, optional denoising).  The
-CUDA kernel organization is cross-checked against
-\textsc{gsplat}~\cite{ye2024gsplat}: fused EWA projection, tile
-intersection, tile-offset construction, flattened Gaussian IDs, and
-tile-local pixel compositing. The Vulkan-facing primitive expansion uses mesh shaders:
-one workgroup processes a batch of Gaussians, computes view-dependent
-color and projected covariance once per splat, and emits the small
-screen-space proxy needed by the fragment/tile stage. The production
-software backend then keeps the same logical structure but executes it
-as explicit tile-binned compute: preprocess, cull, assign splats to
-tiles, sort or approximately order within each tile, and blend pixels.
+Earlier prototypes experimented with a non-standard
+\texttt{VK\_VKGSPLAT\_gaussian\_splatting} submission path for Gaussian
+primitives. That path is now treated as an internal experiment rather than a
+paper thesis: vkGSplat should not require applications to adopt custom Vulkan
+extensions in order to participate. The preferred interface is standard Vulkan
+or captured seed buffers; once data is inside vkGSplat, the backend may store or
+render it as Gaussians.
 
-This is why vkGSplat drops tessellation and geometry shaders from the
-initial design. Tessellation expands surfaces; geometry shaders expand
-or amplify primitives late in the traditional graphics pipeline. For
-Gaussian splats, both jobs are better represented by mesh shaders at the
-API boundary and by tile-local software work in the backend. A system
-that ships this path on day one is immediately useful for captured real
-environments and for Lyra-style generated Gaussian scenes. For the
-current milestone sequence, however, this path is paused behind a build
-flag so the default implementation can focus on Vulkan ray-tracing seed
-frames and CUDA lowering.
+Internally, the optional 3DGS renderer follows the GraphDECO CUDA rasterizer
+released with 3DGS~\cite{kerbl20233dgs}, but extended for offline SDG
+(deterministic ordering, deeper sample budgets per pixel, optional denoising).
+The CUDA kernel organization is cross-checked against
+\textsc{gsplat}~\cite{ye2024gsplat}: fused EWA projection, tile intersection,
+tile-offset construction, flattened Gaussian IDs, and tile-local pixel
+compositing. The production software backend keeps the same logical structure
+but executes it as explicit tile-binned compute: preprocess, cull, assign splats
+to tiles, sort or approximately order within each tile, and blend pixels.
+
+This is why vkGSplat does not prioritize tessellation and geometry shaders in
+the initial software backend. Tessellation expands surfaces; geometry shaders
+expand or amplify primitives late in the traditional graphics pipeline. For
+Gaussian splats, those jobs are better represented by existing mesh-shader
+workloads when they are already present, or by tile-local software work after
+capture. A system that ships this internal path is immediately useful for
+captured real environments and for Lyra-style generated Gaussian scenes. For the
+current milestone sequence, however, it is behind a build flag so the default
+implementation can focus on standard Vulkan ray-tracing seed frames and CUDA
+lowering.
 
 % =====================================================================
 \section{Backends}\label{sec:backends}
@@ -2074,32 +2092,37 @@ post-processing chains, high-fidelity displacement), software renderers
 on compute will pay a large constant factor. Real-time interactive use
 will stay on RTX hardware for the foreseeable future.
 
-\textbf{Why not a new API?} A new graphics API for AI compute has been
-proposed informally many times. The reason to keep Vulkan is ecosystem:
-existing engines (Unreal's Vulkan RHI, Unity, Godot, Filament), tooling
-(RenderDoc, NSight, ImGui), and middleware all speak Vulkan. Reusing
-that surface means a vkGSplat backend benefits the ecosystem
-asymmetrically.
+\textbf{Why not a new API?} A new graphics API for AI compute has
+been proposed informally many times. That is the wrong fight for vkGSplat. In
+the AI data-center setting, the useful move is to embrace the standard world
+and make the implementation programmable behind it. Existing engines (Unreal's
+Vulkan RHI, Unity, Godot, Filament), tooling (RenderDoc, NSight, ImGui), and
+middleware all speak Vulkan. Reusing that surface means a vkGSplat backend
+benefits the ecosystem asymmetrically: applications keep standard Vulkan, while
+the backend decides whether the acquisition comes from RTX hardware, CUDA
+software kernels, or a hybrid path.
 
-\textbf{Strategic implications.} If a viable Vulkan-on-AI-compute path
-exists, the SDG market is no longer constrained by the supply of
-graphics silicon. This is structurally similar to what NVIDIA Omniverse
-does for digital twins, but with the asset-distribution and
-hardware-binding stories inverted: vkGSplat is open at the API, neutral
-at the hardware, and assumes a software-defined data center as its
-deployment target. It is also consistent with the direction the
+\textbf{Strategic implications.} If a viable standard-Vulkan-to-AI-compute
+implementation path exists, the SDG market is no longer constrained by the
+supply of graphics silicon. This is structurally similar to what NVIDIA
+Omniverse does for digital twins, but with the asset-distribution and
+hardware-binding stories inverted: vkGSplat is conservative at the API,
+software-defined behind the boundary, neutral at the hardware, and assumes an AI
+data center as its deployment target. It is also consistent with the direction the
 graphics-hardware industry has been moving for half a decade
 (Section~\ref{sec:dlss}): each successive generation of DLSS-class
 neural reconstruction has shifted more of the rendering pipeline onto
-tensor cores. vkGSplat is the architectural endpoint of that
-trajectory --- a renderer in which \emph{all} of the work, seed and
-reconstruction alike, runs on tensor-rich compute, and graphics
-hardware is no longer in the loop.
+tensor cores. vkGSplat pushes that trajectory into SDG without asking for a new
+application contract: seed acquisition and reconstruction can run on tensor-rich
+compute when economics favor that placement, while graphics hardware remains a
+valid acquisition oracle when it is available.
 
-\textbf{Limitations.} v1 will not be Vulkan-conformant. It will be
-correct on a defined subset, on defined drivers, for defined SDG
-workloads. Conformance is a long-term goal but not a pre-condition for
-usefulness.
+\textbf{Limitations.} v1 will not be Vulkan-conformant. It will be correct on a
+defined compatibility profile, on defined drivers, for defined SDG workloads.
+That limitation should not be hidden by inventing new API terminology. The
+project is a partial software implementation and capture/reconstruction stack
+for ordinary Vulkan workloads; broader conformance is a long-term engineering
+goal, not a pre-condition for usefulness.
 
 % =====================================================================
 \section{Related work, expanded}
