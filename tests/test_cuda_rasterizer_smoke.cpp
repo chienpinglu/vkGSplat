@@ -87,7 +87,10 @@ bool dump_rgba8(const std::string& path,
         }                                                                       \
     } while (0)
 
-bool near(float a, float b, float eps = 1.0e-4f) {
+// Renamed from `near` because <windows.h> (transitively pulled in by the
+// Vulkan-on build via vulkan_win32.h) defines `near` as an empty macro from
+// the 16-bit pointer era, which destroys this function signature.
+bool nearly_equal(float a, float b, float eps = 1.0e-4f) {
     return std::abs(a - b) <= eps;
 }
 
@@ -210,10 +213,10 @@ int main() {
     };
     const FrameId empty_frame = renderer->render(camera, empty_params, empty_target);
     renderer->wait(empty_frame);
-    if (!near(empty_pixels[0].x, empty_params.background.x) ||
-        !near(empty_pixels[0].y, empty_params.background.y) ||
-        !near(empty_pixels[0].z, empty_params.background.z) ||
-        !near(empty_pixels[0].w, 0.0f)) {
+    if (!nearly_equal(empty_pixels[0].x, empty_params.background.x) ||
+        !nearly_equal(empty_pixels[0].y, empty_params.background.y) ||
+        !nearly_equal(empty_pixels[0].z, empty_params.background.z) ||
+        !nearly_equal(empty_pixels[0].w, 0.0f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer empty FP32 clear mismatch: pixel=(%.4f %.4f %.4f %.4f)\n",
                      empty_pixels[0].x,
@@ -265,10 +268,10 @@ int main() {
     };
     const FrameId empty_frame_f16 = renderer->render(camera, empty_params, empty_target_f16);
     renderer->wait(empty_frame_f16);
-    if (!near(half_to_float(empty_pixels_f16[0]), empty_params.background.x, 1.0e-3f) ||
-        !near(half_to_float(empty_pixels_f16[1]), empty_params.background.y, 1.0e-3f) ||
-        !near(half_to_float(empty_pixels_f16[2]), empty_params.background.z, 1.0e-3f) ||
-        !near(half_to_float(empty_pixels_f16[3]), 0.0f, 1.0e-3f)) {
+    if (!nearly_equal(half_to_float(empty_pixels_f16[0]), empty_params.background.x, 1.0e-3f) ||
+        !nearly_equal(half_to_float(empty_pixels_f16[1]), empty_params.background.y, 1.0e-3f) ||
+        !nearly_equal(half_to_float(empty_pixels_f16[2]), empty_params.background.z, 1.0e-3f) ||
+        !nearly_equal(half_to_float(empty_pixels_f16[3]), 0.0f, 1.0e-3f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer empty FP16 clear mismatch: pixel=(%.4f %.4f %.4f %.4f)\n",
                      half_to_float(empty_pixels_f16[0]),
@@ -318,8 +321,8 @@ int main() {
     }
 
     const vkgsplat::float4 corner = pixels[0];
-    if (!near(corner.x, 0.0f) || !near(corner.y, 0.0f) ||
-        !near(corner.z, 0.0f) || !near(corner.w, 0.0f)) {
+    if (!nearly_equal(corner.x, 0.0f) || !nearly_equal(corner.y, 0.0f) ||
+        !nearly_equal(corner.z, 0.0f) || !nearly_equal(corner.w, 0.0f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer did not clear background: corner=(%.4f %.4f %.4f %.4f)\n",
                      corner.x, corner.y, corner.z, corner.w);
@@ -372,10 +375,10 @@ int main() {
         return 1;
     }
     const vkgsplat::float4 compact_center = compact_pixels[8 * 16 + 8];
-    if (!near(compact_center.x, center.x, 1.0e-4f) ||
-        !near(compact_center.y, center.y, 1.0e-4f) ||
-        !near(compact_center.z, center.z, 1.0e-4f) ||
-        !near(compact_center.w, center.w, 1.0e-4f)) {
+    if (!nearly_equal(compact_center.x, center.x, 1.0e-4f) ||
+        !nearly_equal(compact_center.y, center.y, 1.0e-4f) ||
+        !nearly_equal(compact_center.z, center.z, 1.0e-4f) ||
+        !nearly_equal(compact_center.w, center.w, 1.0e-4f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer compact tile output mismatch: compact=(%.4f %.4f %.4f %.4f) fixed=(%.4f %.4f %.4f %.4f)\n",
                      compact_center.x, compact_center.y, compact_center.z, compact_center.w,
@@ -395,8 +398,8 @@ int main() {
     const FrameId preserve_frame = renderer->render(camera, preserve_params, preserve_target);
     renderer->wait(preserve_frame);
     const vkgsplat::float4 preserve_corner = preserve_pixels[0];
-    if (!near(preserve_corner.x, 0.125f) || !near(preserve_corner.y, 0.25f) ||
-        !near(preserve_corner.z, 0.5f) || !near(preserve_corner.w, 0.5f)) {
+    if (!nearly_equal(preserve_corner.x, 0.125f) || !nearly_equal(preserve_corner.y, 0.25f) ||
+        !nearly_equal(preserve_corner.z, 0.5f) || !nearly_equal(preserve_corner.w, 0.5f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer preserve-mode corner mismatch: corner=(%.4f %.4f %.4f %.4f)\n",
                      preserve_corner.x, preserve_corner.y, preserve_corner.z, preserve_corner.w);
@@ -451,10 +454,10 @@ int main() {
     const FrameId preserve_frame_f16 =
         renderer->render(camera, preserve_params, preserve_target_f16);
     renderer->wait(preserve_frame_f16);
-    if (!near(half_to_float(preserve_pixels_f16[0]), 0.125f, 1.0e-3f) ||
-        !near(half_to_float(preserve_pixels_f16[1]), 0.25f, 1.0e-3f) ||
-        !near(half_to_float(preserve_pixels_f16[2]), 0.5f, 1.0e-3f) ||
-        !near(half_to_float(preserve_pixels_f16[3]), 0.75f, 1.0e-3f)) {
+    if (!nearly_equal(half_to_float(preserve_pixels_f16[0]), 0.125f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(preserve_pixels_f16[1]), 0.25f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(preserve_pixels_f16[2]), 0.5f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(preserve_pixels_f16[3]), 0.75f, 1.0e-3f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer FP16 preserve-mode corner mismatch: corner=(%.4f %.4f %.4f %.4f)\n",
                      half_to_float(preserve_pixels_f16[0]),
@@ -522,10 +525,10 @@ int main() {
     const FrameId frame_f16 = renderer->render(camera, params, target_f16);
     renderer->wait(frame_f16);
 
-    if (!near(half_to_float(pixels_f16[0]), 0.0f, 1.0e-3f) ||
-        !near(half_to_float(pixels_f16[1]), 0.0f, 1.0e-3f) ||
-        !near(half_to_float(pixels_f16[2]), 0.0f, 1.0e-3f) ||
-        !near(half_to_float(pixels_f16[3]), 0.0f, 1.0e-3f)) {
+    if (!nearly_equal(half_to_float(pixels_f16[0]), 0.0f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(pixels_f16[1]), 0.0f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(pixels_f16[2]), 0.0f, 1.0e-3f) ||
+        !nearly_equal(half_to_float(pixels_f16[3]), 0.0f, 1.0e-3f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer did not pack FP16 background: corner=(%.4f %.4f %.4f %.4f)\n",
                      half_to_float(pixels_f16[0]),
@@ -542,10 +545,10 @@ int main() {
         half_to_float(pixels_f16[center_f16 + 2]),
         half_to_float(pixels_f16[center_f16 + 3]),
     };
-    if (!near(center_half.x, center.x, 2.0e-3f) ||
-        !near(center_half.y, center.y, 2.0e-3f) ||
-        !near(center_half.z, center.z, 2.0e-3f) ||
-        !near(center_half.w, center.w, 2.0e-3f)) {
+    if (!nearly_equal(center_half.x, center.x, 2.0e-3f) ||
+        !nearly_equal(center_half.y, center.y, 2.0e-3f) ||
+        !nearly_equal(center_half.z, center.z, 2.0e-3f) ||
+        !nearly_equal(center_half.w, center.w, 2.0e-3f)) {
         std::fprintf(stderr,
                      "CUDA rasterizer FP16 output mismatch: half=(%.4f %.4f %.4f %.4f) float=(%.4f %.4f %.4f %.4f)\n",
                      center_half.x, center_half.y, center_half.z, center_half.w,

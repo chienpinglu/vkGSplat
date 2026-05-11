@@ -70,6 +70,58 @@ if(VKGSPLAT_ENABLE_CUDA AND VKGSPLAT_ENABLE_3DGS)
     set_tests_properties(test_cuda_rasterizer_smoke PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+# Honest Phase-6 interop gate: requires both CUDA and Vulkan, exercises the
+# ExternalImage zero-copy seam end-to-end (CUDA kernel writes, Vulkan reads,
+# pixel-exact diff).
+if(VKGSPLAT_ENABLE_CUDA AND VKGSPLAT_ENABLE_VULKAN AND Vulkan_FOUND)
+    add_executable(test_cuda_vulkan_interop test_cuda_vulkan_interop.cu)
+    target_link_libraries(test_cuda_vulkan_interop PRIVATE
+        vkgsplat
+        CUDA::cudart
+        Vulkan::Vulkan)
+    set_target_properties(test_cuda_vulkan_interop PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_test(NAME test_cuda_vulkan_interop COMMAND test_cuda_vulkan_interop)
+    set_tests_properties(test_cuda_vulkan_interop PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Cornell-box CPU vs CUDA reference-image gate: renders a non-trivial
+# Gaussian scene through both backends and asserts PSNR. Catches silent
+# regressions in either the CPU reference or the CUDA tile/scan pipeline
+# that the existing 2-Gaussian smoke tests miss.
+if(VKGSPLAT_ENABLE_CUDA AND VKGSPLAT_ENABLE_3DGS)
+    add_executable(test_cornell_cpu_vs_cuda test_cornell_cpu_vs_cuda.cpp)
+    target_link_libraries(test_cornell_cpu_vs_cuda PRIVATE vkgsplat CUDA::cudart)
+    set_target_properties(test_cornell_cpu_vs_cuda PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_test(NAME test_cornell_cpu_vs_cuda COMMAND test_cornell_cpu_vs_cuda)
+    set_tests_properties(test_cornell_cpu_vs_cuda PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+if(VKGSPLAT_ENABLE_VK_RT_CAPTURE)
+    if(WIN32)
+        find_program(VKGSPLAT_POWERSHELL_VKRT NAMES pwsh powershell)
+        if(NOT VKGSPLAT_POWERSHELL_VKRT)
+            message(FATAL_ERROR "VKGSPLAT_ENABLE_VK_RT_CAPTURE=ON on Windows requires pwsh or powershell")
+        endif()
+        add_test(
+            NAME test_vk_rt_smoke
+            COMMAND ${VKGSPLAT_POWERSHELL_VKRT}
+                -NoProfile -ExecutionPolicy Bypass
+                -File ${CMAKE_SOURCE_DIR}/scripts/run_vk_rt_smoke.ps1
+                -AllowSkip
+                -BuildDir ${CMAKE_BINARY_DIR}
+                -Config $<CONFIG>
+        )
+        set_tests_properties(test_vk_rt_smoke PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 60
+            DEPENDS vk_rt_capture
+        )
+    endif()
+endif()
+
 if(VKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS)
     if(WIN32)
         find_program(VKGSPLAT_POWERSHELL NAMES pwsh powershell)
