@@ -15,10 +15,67 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <vector>
 
 namespace {
+
+std::uint8_t to_u8(float v) {
+    const float c = std::min(1.0f, std::max(0.0f, v));
+    return static_cast<std::uint8_t>(c * 255.0f + 0.5f);
+}
+
+bool write_ppm_rgb8(const std::string& path,
+                    const std::uint8_t* rgb,
+                    int width,
+                    int height,
+                    int upscale = 1) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    const int W = width * upscale;
+    const int H = height * upscale;
+    out << "P6\n" << W << ' ' << H << "\n255\n";
+    for (int y = 0; y < H; ++y) {
+        const int sy = y / upscale;
+        for (int x = 0; x < W; ++x) {
+            const int sx = x / upscale;
+            const std::uint8_t* p = rgb + (sy * width + sx) * 3;
+            out.write(reinterpret_cast<const char*>(p), 3);
+        }
+    }
+    return out.good();
+}
+
+bool dump_float_rgba(const std::string& path,
+                     const vkgsplat::float4* px,
+                     int width,
+                     int height,
+                     int upscale = 16) {
+    std::vector<std::uint8_t> rgb(width * height * 3);
+    for (int i = 0; i < width * height; ++i) {
+        rgb[i * 3 + 0] = to_u8(px[i].x);
+        rgb[i * 3 + 1] = to_u8(px[i].y);
+        rgb[i * 3 + 2] = to_u8(px[i].z);
+    }
+    return write_ppm_rgb8(path, rgb.data(), width, height, upscale);
+}
+
+bool dump_rgba8(const std::string& path,
+                const std::uint8_t* rgba,
+                int width,
+                int height,
+                int upscale = 16) {
+    std::vector<std::uint8_t> rgb(width * height * 3);
+    for (int i = 0; i < width * height; ++i) {
+        rgb[i * 3 + 0] = rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    return write_ppm_rgb8(path, rgb.data(), width, height, upscale);
+}
+
 
 #define CHECK_CUDA(expr)                                                        \
     do {                                                                        \
@@ -253,6 +310,13 @@ int main() {
     const FrameId frame = renderer->render(camera, params, target);
     renderer->wait(frame);
 
+    const auto out_dir = std::filesystem::absolute("cuda_smoke_output");
+    std::filesystem::create_directories(out_dir);
+    const auto path_float = (out_dir / "01_float_rgba.ppm").string();
+    if (dump_float_rgba(path_float, pixels.data(), 16, 16)) {
+        std::fprintf(stdout, "[dump] float buffer  -> %s\n", path_float.c_str());
+    }
+
     const vkgsplat::float4 corner = pixels[0];
     if (!near(corner.x, 0.0f) || !near(corner.y, 0.0f) ||
         !near(corner.z, 0.0f) || !near(corner.w, 0.0f)) {
@@ -409,6 +473,11 @@ int main() {
     const FrameId frame_u8 = renderer->render(camera, params, target_u8);
     renderer->wait(frame_u8);
 
+    const auto path_u8 = (out_dir / "02_host_rgba8.ppm").string();
+    if (dump_rgba8(path_u8, pixels_u8.data(), 16, 16)) {
+        std::fprintf(stdout, "[dump] host RGBA8    -> %s\n", path_u8.c_str());
+    }
+
     if (pixels_u8[0] != 0 || pixels_u8[1] != 0 ||
         pixels_u8[2] != 0 || pixels_u8[3] != 0) {
         std::fprintf(stderr,
@@ -560,6 +629,16 @@ int main() {
                                      16 * sizeof(uchar4),
                                      16,
                                      cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaDestroySurfaceObject(surface));
+    CHECK_CUDA(cudaFreeArray(surface_array));
+
+    const auto path_surf = (out_dir / "03_cuda_surface.ppm").string();
+    if (dump_rgba8(path_surf,
+                   reinterpret_cast<const std::uint8_t*>(surface_pixels.data()),
+                   16, 16)) {
+        std::fprintf(stdout, "[dump] CUDA surface  -> %s\n", path_surf.c_str());
+    }
+
     const uchar4 surface_corner = surface_pixels[0];
     if (surface_corner.x != 0 || surface_corner.y != 0 ||
         surface_corner.z != 0 || surface_corner.w != 0) {
