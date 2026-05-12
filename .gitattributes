@@ -1,0 +1,74 @@
+# Default: let git auto-detect text vs binary, store LF in the repo, and let
+# each working tree decide its own line endings via core.autocrlf. This
+# prevents the "ghost modified" state on Windows when a tool (e.g. an IDE or
+# Cursor) writes files with LF while git would otherwise expect CRLF on disk.
+* text=auto eol=lf
+
+# --- Source code (text, LF in repo) ----------------------------------------
+*.cpp     text diff=cpp
+*.cu      text diff=cpp
+*.cuh     text diff=cpp
+*.h       text diff=cpp
+*.hpp     text diff=cpp
+*.mm      text diff=cpp
+*.slang   text
+*.vert    text
+*.frag    text
+*.glsl    text
+*.comp    text
+
+# --- Build & config (text) -------------------------------------------------
+*.cmake          text
+CMakeLists.txt   text
+*.txt            text
+*.md             text
+*.tex            text
+*.bib            text
+*.json           text
+*.yml            text
+*.yaml           text
+*.toml           text
+.gitignore       text
+.gitattributes   text
+
+# --- Scripts ---------------------------------------------------------------
+# Unix shell scripts MUST stay LF, otherwise they break on Linux/macOS/WSL.
+*.sh         text eol=lf
+Makefile     text eol=lf
+*.py         text eol=lf
+
+# Windows-only scripts stay CRLF.
+*.ps1        text eol=crlf
+*.psm1       text eol=crlf
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+
+# --- Binary assets (no conversion, no diff) --------------------------------
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.mp4        binary
+*.mov        binary
+*.pdf        binary
+*.pptx       binary
+*.docx       binary
+*.xlsx       binary
+*.zip        binary
+*.tar        binary
+*.tar.gz     binary
+*.tgz        binary
+
+# --- GPU / engine artifacts (binary) ---------------------------------------
+*.spv        binary
+*.cubin      binary
+*.fatbin     binary
+*.ptx        binary
+*.ply        binary
+*.splat      binary
+*.bin        binary
+*.dll        binary
+*.exe        binary
+*.lib        binary
+*.so         binary
+*.dylib      binary
