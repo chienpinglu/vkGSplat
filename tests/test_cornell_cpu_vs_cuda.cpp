@@ -22,7 +22,6 @@
 // into the build directory so the harness or a reviewer can compare them
 // by eye.
 
-#include <vkgsplat/cpu_reference_renderer.h>
 #include <vkgsplat/renderer.h>
 #include <vkgsplat/types.h>
 

@@ -632,8 +632,6 @@ int main() {
                                      16 * sizeof(uchar4),
                                      16,
                                      cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaDestroySurfaceObject(surface));
-    CHECK_CUDA(cudaFreeArray(surface_array));
 
     const auto path_surf = (out_dir / "03_cuda_surface.ppm").string();
     if (dump_rgba8(path_surf,
