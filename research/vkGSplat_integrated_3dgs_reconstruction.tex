@@ -7,9 +7,9 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{url}
 
-\title{vkGSplat: Is 3D Gaussian Splatting a Good Integration Layer for DLSS-Class Reconstruction?}
+\title{vkGSplat: 3DGS Reconstruction for Vulkan-Compatible World Semantics and DLSS-Class Resolve}
 \author{vkGSplat research note}
-\date{Started May 5, 2026}
+\date{Started May 5, 2026; updated May 12, 2026}
 
 \begin{document}
 \maketitle
@@ -20,8 +20,9 @@ The answer is \textbf{qualified yes}. 3D Gaussian Splatting is a promising way
 to integrate Monte Carlo denoising, radiance caching, temporal anti-aliasing,
 temporal super-resolution, supersampling, frame interpolation, and learned
 reconstruction, but only if vkGSplat treats 3DGS as a \emph{shared persistent
-reconstruction state}, not as a standalone renderer or a bag of unrelated
-tricks.
+reconstruction state}: the reconstruction-side materialization of
+Vulkan-compatible world semantics, not a standalone renderer or a bag of
+unrelated tricks.
 
 The central claim to test is:
 
@@ -35,14 +36,15 @@ integration layer for vkGSplat.
 
 The software-stack consequence is important: 3DGS is \emph{not} the whole
 renderer, and DLSS-style reconstruction is \emph{not} the acquisition stage.
-vkGSplat should keep software renderers as replaceable acquisition producers.
-A CPU ray tracer, an Apple Metal backend, a future CUDA software ray tracer, a
-\textsc{nvdiffrast}-style CUDA triangle rasterizer, and a GraphDECO/\textsc{gsplat}
-Gaussian rasterizer should all be allowed to produce the same seed-buffer
-contract. The 3DGS/DLSS-class research layer begins after that boundary: it
-consumes color, depth, primitive identity, motion, variance, and auxiliary
-signals, then performs history, denoising, super-resolution, frame generation,
-and optional neural residual reconstruction.
+vkGSplat should keep software renderers as replaceable producers behind a
+Vulkan-compatible acquisition contract. A CPU ray tracer, an Apple Metal
+backend, a future CUDA software ray tracer, a \textsc{nvdiffrast}-style CUDA
+triangle rasterizer, and a GraphDECO/\textsc{gsplat} Gaussian rasterizer should
+all be allowed to produce the same seed-buffer contract. The 3DGS/DLSS-class
+research layer begins after that boundary: it consumes color, depth, primitive
+identity, motion, variance, and auxiliary signals, then performs history,
+denoising, super-resolution, frame generation, and optional neural residual
+reconstruction.
 
 The core framework therefore does \emph{not} require massive training. The
 initial stack is analytic and systems-oriented: software acquisition, seed
@@ -108,7 +110,7 @@ stability, or cost before large-scale training enters the loop.
 
 \section{What ``Good Integration Layer'' Means}
 
-3DGS is useful here only if it satisfies four criteria:
+3DGS is useful here only if it satisfies five criteria:
 
 \begin{enumerate}
   \item \textbf{Shared state:} the same Gaussian state helps more than one
@@ -137,16 +139,18 @@ whether a shared Gaussian state is a good \emph{GPU} integration layer.
 \section{Software-Stack Boundary}
 
 This note is a companion to the broader vkGSplat system paper in
-\texttt{papers/vkGSplat.tex}. The system paper argues for a compute-first
-Vulkan path for synthetic data generation: capture existing Vulkan/Wicked
-workloads, lower acquisition to CUDA-class compute, and preserve a stable
-seed-buffer ABI. This note deliberately starts after that boundary. It asks
-whether a persistent Gaussian state is the right reconstruction and reuse
-layer once seed evidence already exists. Therefore the two papers should
-cross-reference each other rather than duplicate material: the system paper
-owns the Vulkan/SDG/hardware-allocation argument, while this note owns the
-3DGS reconstruction, tensorization, radiance-cache, and frame-generation
-algorithms.
+\texttt{papers/vkGSplat.tex}. The system paper defines the application-facing
+contract: capture existing Vulkan/Wicked workloads, lower acquisition to
+CUDA-class compute, and preserve a stable seed-buffer ABI. This note
+deliberately starts after that boundary. It asks whether a persistent Gaussian
+state is the right reconstruction and reuse layer once seed evidence already
+exists. In the master-paper terminology, the seed ABI is the
+Vulkan-compatible acquisition contract, while the persistent Gaussian cache is a
+concrete implementation of Vulkan-compatible world semantics. Therefore the two
+papers should cross-reference each other rather than duplicate material: the
+system paper owns the Vulkan/SDG/hardware-allocation argument, while this note
+owns the 3DGS reconstruction, tensorization, radiance-cache, and
+frame-generation algorithms.
 
 The current vkGSplat stack should be read as two independent layers joined by a
 stable seed ABI:
@@ -155,11 +159,13 @@ stable seed ABI:
 \begin{gathered}
 \text{Vulkan/Wicked command stream or captured scene state}\\
 \downarrow\\
-\text{software acquisition renderer}\\
+\text{software acquisition renderer behind a Vulkan-compatible contract}\\
 \downarrow\\
-\text{seed buffers}\\
+\text{seed buffers: color, depth, IDs, motion, variance, metadata}\\
 \downarrow\\
-\text{3DGS/DLSS-class reconstruction layer}
+\text{Vulkan-compatible world semantics in persistent Gaussian state}\\
+\downarrow\\
+\text{3DGS/DLSS-class reconstruction and resolve}
 \end{gathered}
 \]
 
@@ -180,8 +186,11 @@ beauty frames. A seed frame should contain at least:
 The reconstruction layer answers a different question: ``how should these
 measurements be reused over space, time, and scale?'' It owns temporal
 anti-aliasing, denoising, super-resolution, radiance-cache reuse, frame
-interpolation, Gaussian state maintenance, and any learned residual. It should
-not branch on whether the seed came from CPU, Metal, or CUDA acquisition.
+interpolation, Gaussian state maintenance, and any learned residual. It is not
+a new public IR and not a Vulkan extension. It is a private semantic cache that
+records the world facts needed by CUDA/PyTorch reconstruction while preserving
+ordinary Vulkan-facing application behavior. It should not branch on whether
+the seed came from CPU, Metal, or CUDA acquisition.
 
 This separation changes how to use existing CUDA renderers. \textsc{nvdiffrast}
 is a source-level reference for a CUDA triangle acquisition backend: triangle
@@ -193,7 +202,7 @@ with 3DGS provides the canonical Gaussian acquisition path
 packed/unpacked projection, tile intersections, flattened IDs, and
 front-to-back compositing \cite{ye2024gsplat}. None of these should leak
 private assumptions into the DLSS-class reconstruction layer. They are
-producers of the same seed ABI.
+producers of the same Vulkan-compatible seed ABI.
 
 The clean test is whether a recorded seed buffer can be replayed through the
 reconstruction layer with no acquisition backend present. If it can, the stack
@@ -1188,6 +1197,13 @@ door accepts \texttt{torch.Tensor}/\textsc{nvdiffrast} buffers; the runtime
 front door accepts Vulkan-exported CUDA memory with the same shapes and
 strides. PyTorch should be a caller and allocator for experiments, not the
 owner of the renderer architecture.
+
+This tensor ABI is the concrete form of Vulkan-compatible world semantics for
+the reconstruction paper. The public side remains ordinary Vulkan objects and
+command streams; the private CUDA side sees dense seed tensors, sparse Gaussian
+state, tile lists, radiance pages, confidence, variance, and provenance. That
+split is the main reason the 3DGS layer can be acquisition-independent while
+still staying useful to existing engines.
 
 For the rest of this note, use the following M--N--K convention:
 
@@ -3473,6 +3489,13 @@ a measurable signal should vkGSplat add a small learned resolver. If it does
 not, 3DGS may still be useful for individual features, but not as the
 integrating idea behind vkGSplat.
 
+The near-term wording should stay disciplined. Do not present the Gaussian
+state as a general scene IR. Present it as Vulkan-compatible world semantics:
+the private CUDA/PyTorch reconstruction state inferred from a
+Vulkan-compatible acquisition contract. That makes the claim concrete enough to
+test in the current repository, while still leaving room for future sensor and
+Physical AI semantics.
+
 \appendix
 
 \section{Appendix: Starting from Zero Graphics Hardware}
@@ -3683,7 +3706,8 @@ nvidia2026isaacsim}. Isaac Sim also separates rendering from physics-based
 sensors: those sensors run after rendering, access physics properties such as
 mass and velocity, and emit physics-engine measurements that may be augmented by
 post-process noise \cite{nvidia2026isaacphysicssensors}. vkGSplat should follow
-the same separation of authority.
+the same separation of authority: Vulkan-compatible world semantics preserves
+and organizes acquired evidence, but it does not become the physical oracle.
 
 The most important design rule is that physical realism enters primarily during
 acquisition. In a real deployment, acquisition means calibrated cameras, LiDAR,

@@ -28,7 +28,10 @@ longer produce the final image — they produce a sparse, noisy seed
 that AI reconstructs on tensor cores.** vkGSplat is the architectural
 endpoint of that trajectory: replace the seed generator with a
 software renderer on the same tensor-rich silicon, and graphics
-hardware drops out of the loop.
+hardware drops out of the loop. The named reconstruction counterpart is
+**DGSS: Deep Generation Super Sampling** — 3DGS and persistent-state based
+reconstruction for denoising, temporal reuse, super-resolution, frame
+interpolation, and SDG-oriented generative completion.
 
 For SDG specifically — throughput-bound, latency-tolerant, consumed by
 a learned model rather than a human eye — this trade is straightforward.
@@ -45,18 +48,37 @@ a learned model rather than a human eye — this trade is straightforward.
 3. **Robotics SDG demand is exploding.** Isaac Sim, BlenderProc,
    Kubric, Cosmos, ProcTHOR are all rendering-bottlenecked.
 4. **The Vulkan ecosystem is huge.** Unreal RHI, Unity, Godot,
-   Filament, RenderDoc, NSight all speak Vulkan. Reusing the API gives
+   Filament, RenderDoc, Nsight all speak Vulkan. Reusing the API gives
    the project the entire graphics tooling ecosystem for free.
+
+## Vulkan leverage
+
+The near-term leverage is Vulkan itself. Vulkan already gives vkGSplat a standard way to inherit production
+engines, scene assets, shader modules, descriptor layouts, command buffers,
+synchronization, external memory, ray-tracing pipelines, mesh-shader workloads,
+and debugging tools. That is the bridge from existing SDG/rendering stacks to
+CUDA software rendering.
+
+The implementation can be radical behind the boundary while staying conservative
+at the boundary: ingest ordinary Vulkan work, capture the seed buffers and
+shader/resource contracts that matter, then lower selected acquisition and
+reconstruction work to CUDA kernels. Persistent 3DGS/radiance state is an
+internal cache and reconstruction substrate, not something applications need to
+target. We call the internal semantic goal \textbf{Vulkan-compatible world
+semantics}: identity, geometry, materials, motion, sensor context, uncertainty,
+provenance, and Gaussian/radiance history reconstructed behind a standard Vulkan
+boundary.
 
 ## Architecture (4 layers)
 
-1. **Vulkan front-end** — loadable ICD; conformance-targeted subset
+1. **Vulkan leverage front-end** — loadable ICD; conformance-targeted subset
    of Vulkan 1.3 + ray-tracing + external-memory; apps need no changes.
-2. **Compute IR** — SPIR-V → LLVM/MLIR; command buffers as
-   record-and-replay; backend-agnostic.
-3. **Compute backend** — CUDA reference; Triton / SYCL portable;
+2. **SPIR-V and command lowering** — shader modules, descriptor/resource
+   bindings, command buffers, barriers, and dispatch geometry lowered to a
+   backend-agnostic compute representation.
+3. **Compute backend** — CUDA first; Triton / SYCL portable;
    eventually XLA HLO (TPU), NeuronCore (Trainium).
-4. **World-State IR** — internal, device-resident semantic state:
+4. **Vulkan-compatible world semantics** — internal, device-resident cache:
    seed buffers, primitive/material IDs, motion, lighting, sensors,
    uncertainty, Gaussian/radiance history, and refresh provenance.
 
@@ -67,13 +89,17 @@ submission standard. Vulkan is the application and acquisition contract. The v1
 path captures or ingests ordinary Vulkan-shaped seed buffers, lowers selected
 raster and ray-tracing work to CUDA software kernels where useful, and uses 3DGS
 as an internal reconstruction/state layer behind that boundary. The positive
-semantic layer is the **World-State IR**, not a new Vulkan API: it is the private
-state that connects acquisition facts, physics/sensor metadata, Gaussian
-history, uncertainty, and training feedback.
+near-term story is Vulkan leverage: use Vulkan's existing engines, shaders,
+resources, tools, and synchronization as the practical acquisition surface. The
+private persistent state cache reconstructs Vulkan-compatible world semantics
+from acquisition facts, physics/sensor metadata, Gaussian history, uncertainty,
+and training feedback, but it should remain an implementation detail until the
+CUDA path proves its value.
 
 3DGS remains useful because it is compute-native and gives the system an
-explicit scene/radiance memory for denoising, temporal reuse, supersampling, and
-frame interpolation. But direct Gaussian submission is an implementation
+explicit scene/radiance memory for **Deep Generation Super Sampling (DGSS)**:
+denoising, temporal reuse, supersampling, frame interpolation, and generative
+completion. But direct Gaussian submission is an implementation
 experiment, not the standard-facing product.
 
 ## What this is *not*

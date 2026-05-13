@@ -19,6 +19,18 @@ fixed-function graphics units onto tensor cores. vkGSplat is the architectural
 endpoint of that trajectory — a renderer where seed *and* reconstruction both
 live on tensor-rich compute.
 
+Terminology used in the paper:
+
+- **Vulkan-compatible acquisition contract**: the API-facing boundary. Existing
+  applications keep ordinary Vulkan pipelines, SPIR-V modules, descriptors,
+  command buffers, synchronization, and resource lifetimes.
+- **Vulkan-compatible world semantics**: the internal semantic goal. vkGSplat
+  reconstructs identity, motion, geometry, materials, sensor context,
+  uncertainty, provenance, and Gaussian/radiance history behind the Vulkan
+  boundary.
+- **Persistent state cache**: the implementation object that stores those
+  semantics for CUDA/PyTorch reconstruction and training feedback.
+
 The current implementation plan is tracked in `docs/plan.md`. The default build
 focuses on Vulkan/SPIR-V capture contracts, ray-tracing seed frames, temporal
 reprojection, denoising, native Metal validation on Apple GPUs, and CUDA

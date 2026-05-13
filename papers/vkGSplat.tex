@@ -68,11 +68,11 @@ This framing explains several otherwise separate trends. DLSS-class rendering
 already treats rasterization and ray tracing as sparse acquisition followed by
 tensor-side reconstruction~\cite{nvidia-dlss,liu2020nsrr,nvidia-dlss3,nvidia-dlss35rr}.
 However, DLSS is compute-heavy in implementation but proprietary and
-graphics-stack-packaged in deployment. vkGSplat therefore treats integrated
-3DGS/radiance state as the open DLSS-class replacement layer for SDG: a
-device-resident reconstruction memory that consumes sparse seeds and serves
-denoising, temporal reuse, super-resolution, frame interpolation, and
-confidence-gated oracle refresh.
+graphics-stack-packaged in deployment. vkGSplat therefore names its open
+3DGS counterpart \textbf{Deep Generation Super Sampling (DGSS)}: a
+Vulkan-seed-buffer-backed Gaussian/radiance reconstruction layer that consumes
+sparse seeds and serves denoising, temporal reuse, super-resolution, frame
+interpolation, generative completion, and confidence-gated oracle refresh.
 Robotics SDG is throughput-bound and latency-tolerant, so it can trade
 fixed-function graphics latency for compute portability. More importantly, SDG
 has an amortized world-building phase that games do not: it can spend seconds,
@@ -84,20 +84,22 @@ calibrated physics and sensors when they act as priors, rollout generators, or
 proposal mechanisms~\cite{ha2018,bruce2024,deepmind2024genie2,nvidia2024cosmos}.
 We use \textbf{vkGSplat} as the reference implementation of this philosophy. The
 name is intentional: \textbf{vk} means the system embraces standard Vulkan as the
-application and acquisition contract, and \textbf{GSplat} means 3D Gaussian
-Splatting becomes the open reconstruction layer that replaces the architectural
-role of proprietary DLSS for SDG. This is not a proposal for a new graphics API,
+application, workload, shader, resource, synchronization, and tooling leverage
+point, and \textbf{GSplat} means 3D Gaussian
+Splatting becomes DGSS, the open reconstruction layer that replaces the
+architectural role of proprietary DLSS for SDG. This is not a proposal for a new graphics API,
 a semantic extension of Vulkan, or a replacement standard. The architecture is
 acquisition-backend neutral: a conventional Vulkan renderer on graphics hardware
 is a valid and often best acquisition oracle. vkGSplat instead asks how much of
 the work behind the existing Vulkan contract can be lowered to CUDA-class
 software kernels and persistent Gaussian state when data generation,
 reconstruction, training, and world-model inference should remain on tensor-rich
-accelerators. The semantic layer in this design is internal: a
-\textbf{World-State IR} that records geometry, primitive identity, material and
-lighting state, sensor pose, motion, uncertainty, and Gaussian/radiance history
-after acquisition. It is an optimization and reconstruction substrate behind
-Vulkan, not a new API surface. The CUDA software path is useful when the renderer
+accelerators. The internal semantic goal is \textbf{Vulkan-compatible world
+semantics}: geometry, primitive identity, material and lighting state, sensor
+pose, motion, uncertainty, and Gaussian/radiance history reconstructed behind a
+standard Vulkan boundary. It is materialized as a device-resident persistent
+state cache, an optimization and reconstruction substrate behind Vulkan, not a
+new API surface or a near-term standard. The CUDA software path is useful when the renderer
 must expose custom sample statistics and explicit Gaussian state updates, but
 those are implementation artifacts behind the standard contract, not new
 application semantics. vkGSplat is not the whole thesis; it is the concrete test of whether
@@ -112,8 +114,8 @@ on dollars per image}, while preserving downstream sim-to-real task accuracy.
 
 \begin{IEEEkeywords}
 Physical AI, synthetic data generation, world models, acquisition and
-reconstruction, DLSS-class reconstruction, Vulkan, software rendering, 3D
-Gaussian splatting, robotics, AI accelerators.
+reconstruction, Deep Generation Super Sampling, DLSS-class reconstruction,
+Vulkan, software rendering, 3D Gaussian splatting, robotics, AI accelerators.
 \end{IEEEkeywords}
 
 % =====================================================================
@@ -184,8 +186,12 @@ feature inside the RTX/game-rendering stack. That packaging is rational for
 games, yet it is the wrong boundary for AIDC-native synthetic data generation.
 vkGSplat keeps the useful architectural lesson and changes the substrate:
 integrated 3DGS/radiance state replaces the role of DLSS as the reconstruction
-layer, while remaining open, scene-aware, persistent across views, and directly
-connected to CUDA/PyTorch training workflows.
+layer. We call this layer \emph{Deep Generation Super Sampling} (DGSS): deep
+because learned resolvers may be attached, generation because the target is SDG
+and world-model feedback rather than only display upscaling, and super sampling
+because sparse physical evidence is reconstructed across space, time, views, and
+Gaussian/radiance history. DGSS remains open, scene-aware, persistent across
+views, and directly connected to CUDA/PyTorch training workflows.
 
 World-model research fits the same loop when its role is stated carefully.
 Classical world models learn compact predictive dynamics for control
@@ -281,19 +287,25 @@ CUDA/PyTorch on the AI cluster.
 architecture. It preserves standard Vulkan as the application boundary, treats
 hardware Vulkan output as a first-class acquisition source, and adds a CUDA
 software path for seed generation and reconstruction when the pipeline benefits
-from AI-compute co-location. It does not ask applications, engines, or tools to
-adopt an ``extended Vulkan'' semantic layer. The standard world is a feature:
-once visual acquisition is expressed as compute, vkGSplat can embrace Vulkan
-as-is and move implementation freedom behind the API boundary. The positive
-semantic layer is therefore not Vulkan-derived. It is a device-resident
-\emph{World-State IR}: an internal representation that joins Vulkan-visible seed
-buffers with geometry, material, lighting, motion, sensor, uncertainty, and
-Gaussian/radiance state. It also explores persistent 3D/4D Gaussian state as an
-explicit memory for physical evidence. The
-name carries the system boundary: \emph{vk} denotes standard Vulkan
-compatibility through a CUDA software path, while \emph{GSplat} denotes 3D
-Gaussian Splatting as the open DLSS-class integration layer for denoising,
-temporal reuse, super-resolution, frame interpolation, and radiance state. The
+from AI-compute co-location. The near-term leverage is Vulkan itself: existing
+engines, assets, SPIR-V shader modules, descriptor sets, command buffers,
+barriers, external-memory handles, ray-tracing/mesh-shader workload structure,
+and graphics debugging tools become the input contract. vkGSplat does not ask
+applications, engines, or tools to adopt an ``extended Vulkan'' semantic layer.
+The standard world is a feature: once visual acquisition is expressed as
+compute, vkGSplat can embrace Vulkan as-is and move implementation freedom
+behind the API boundary.
+
+The internal semantic layer should therefore be presented as
+\emph{Vulkan-compatible world semantics}, not as a new front-facing IR. It joins
+Vulkan-visible seed buffers with geometry, material, lighting, motion, sensor,
+uncertainty, and Gaussian/radiance state, and it is materialized as a private
+persistent state cache that can evolve without becoming a standard applications
+must target. The name carries the system boundary: \emph{vk} denotes standard
+Vulkan compatibility through a CUDA software path, while \emph{GSplat} denotes
+3D Gaussian Splatting as DGSS, the open DLSS-class integration layer for denoising,
+temporal reuse, super-resolution, frame interpolation, generative completion,
+and radiance state. The
 paper therefore has two layers. The first is the philosophy:
 Physical AI data generation should combine calibrated acquisition, explicit
 state, learned reconstruction, and uncertainty-gated oracle refresh. The second
@@ -332,24 +344,28 @@ generation, with \textbf{vkGSplat} as the reference system. We make eleven claim
     are pipeline-scheduled kernels, while compute shaders expose explicit
     load/store, workgroup, and user-defined data-layout control. vkGSplat moves
     one step further by lifting reconstruction out of screen space into
-    persistent 3D/4D Gaussian, radiance-cache, and world-state address spaces
+    persistent 3D/4D Gaussian, radiance-cache, and device-state cache spaces
     (Section~\ref{sec:acqrec}).
 
-    \item \textbf{3DGS as the open DLSS-class integration layer.}
+    \item \textbf{DGSS: 3DGS as the open DLSS-class integration layer.}
     DLSS is compute reconstruction packaged as a proprietary graphics-stack
     feature. vkGSplat replaces that architectural role, not by cloning DLSS,
-    but by using integrated 3DGS/radiance state as an open, persistent,
-    scene-aware reconstruction layer for denoising, TAA, super-resolution,
-    frame interpolation, radiance-cache reuse, and confidence-gated oracle
-    refresh (Section~\ref{sec:dlss}).
+    but by using integrated 3DGS/radiance state as \emph{Deep Generation Super
+    Sampling} (DGSS): an open, persistent, scene-aware reconstruction layer for
+    denoising, TAA, super-resolution, frame interpolation, generative completion,
+    radiance-cache reuse, and confidence-gated oracle refresh
+    (Section~\ref{sec:dlss}).
 
-    \item \textbf{World-State IR.} The useful semantic layer is internal rather
-    than application-facing. vkGSplat constructs a device-resident World-State IR
-    from standard Vulkan acquisition, software seed buffers, physics and sensor
-    metadata, and Gaussian/radiance history. This IR gives CUDA and PyTorch a
-    common address space for reconstruction, invalidation, uncertainty, and
-    training feedback without asking engines to adopt a new Vulkan dialect
-    (Section~\ref{sec:world-state-ir}).
+    \item \textbf{Vulkan leverage and world semantics.} The near-term leverage
+    is Vulkan itself: existing engines, SPIR-V modules, descriptor/resource
+    contracts, command buffers, synchronization, ray-tracing workloads,
+    mesh-shader workloads, and RenderDoc/Nsight tooling. vkGSplat keeps that boundary
+    standard while reconstructing \emph{Vulkan-compatible world semantics} from
+    Vulkan seed buffers, software acquisition, physics and sensor metadata, and
+    Gaussian/radiance history. A private persistent state cache gives CUDA and
+    PyTorch the internal address space for reconstruction, invalidation,
+    uncertainty, and training feedback without asking engines to adopt a new
+    Vulkan dialect (Section~\ref{sec:vulkan-world-semantics}).
 
     \item \textbf{Allocation law.} The modernized Amdahl argument uses the
     allocation objective
@@ -394,10 +410,11 @@ generation, with \textbf{vkGSplat} as the reference system. We make eleven claim
     reconstruction backend. It is not an extended Vulkan dialect, not a semantic
     extension, and not a new standard. Its name summarizes the bet: \emph{vk} is Vulkan
     embraced as-is while selected work is executed through CUDA software, and
-    \emph{GSplat} is 3DGS replacing DLSS's architectural role as an open
+    \emph{GSplat} is 3DGS replacing DLSS's architectural role as DGSS, an open
     reconstruction layer. The point is not merely software rendering, but an
-    explicit World-State IR bridge between physical evidence, Gaussian state,
-    sensor metadata, uncertainty, and tensor-side reconstruction
+    explicit Vulkan-leverage bridge: existing applications and tools keep their
+    standard Vulkan surface while physical evidence, Gaussian state, sensor
+    metadata, uncertainty, and tensor-side reconstruction live behind it
     (Section~\ref{sec:design}).
 
     \item \textbf{Ray-tracing seed path before 3DGS.}
@@ -870,8 +887,7 @@ seed-buffer contract, but implement acquisition and reconstruction as
 tile-friendly compute when AI-hardware co-location and programmability dominate
 the cost model.
 
-\subsection{The DLSS precedent, and why vkGSplat replaces its role with
-integrated 3DGS}
+\subsection{The DLSS precedent, and why vkGSplat replaces its role with DGSS}
 \label{sec:dlss}
 
 The strongest evidence that graphics workloads can move off
@@ -886,7 +902,12 @@ In other words, DLSS is not primarily a rasterizer or RT-core story. It is a
 compute reconstruction story that has been productized as part of the graphics
 stack. vkGSplat's claim is that SDG needs that same reconstruction role, but
 with an open, explicit, device-resident 3DGS/radiance state instead of a closed
-image-space model packaged with graphics hardware.
+image-space model packaged with graphics hardware. We call the vkGSplat
+counterpart \emph{Deep Generation Super Sampling} (DGSS). The name is deliberate:
+DLSS is deep learning super sampling for display images; DGSS is deep generation
+super sampling for synthetic data generation, where the reconstruction target is
+not only the next pixel but also Gaussian state, radiance history, sensor
+evidence, uncertainty, and training feedback.
 Ray-traced global illumination follows the same pattern:
 single-sample-per-pixel or low-sample path tracing produces sparse
 radiance, then spatiotemporal filters and denoisers reconstruct the
@@ -927,13 +948,13 @@ vkGSplat does not need to clone DLSS; it needs to replace DLSS's architectural
 role for SDG. DLSS proves that the valuable part of modern rendering has moved
 toward compute-side reconstruction, but DLSS itself is closed, display-oriented,
 and coupled to a product stack optimized for games. vkGSplat's replacement is
-integrated 3DGS: persistent Gaussian/radiance state that stores geometry,
-radiance, motion, confidence, variance, and validity epochs, then serves
-denoising, TAA, super-resolution, frame interpolation, radiance-cache reuse, and
-optional learned residuals. The vkGSplat question is therefore narrower and
-more actionable: if the seed is already sparse, noisy, and reconstructed anyway,
-can software rendering produce that seed on AI compute cheaply enough, and can
-integrated 3DGS reconstruct it well enough, for SDG? Published software
+DGSS: persistent Gaussian/radiance state that stores geometry, radiance, motion,
+confidence, variance, and validity epochs, then serves denoising, TAA,
+super-resolution, frame interpolation, generative completion, radiance-cache
+reuse, and optional learned residuals. The vkGSplat question is therefore
+narrower and more actionable: if the seed is already sparse, noisy, and
+reconstructed anyway, can software rendering produce that seed on AI compute
+cheaply enough, and can DGSS reconstruct it well enough, for SDG? Published software
 rasterization~\cite{laine2011software}, GPU ray traversal
 ~\cite{aila2009understanding}, neural supersampling~\cite{xiao2020}, and
 compute-native 3DGS~\cite{kerbl20233dgs} make the answer plausible. vkGSplat is
@@ -1547,7 +1568,7 @@ Capital plan & Dedicated graphics procurement and refresh cycle & Rides existing
 Utilization & Must keep a rendering fleet busy enough to justify ownership & Can fill training gaps, off-peak windows, and batched data-generation queues \\
 Software stack & Renderer-specific deployment, driver, profiling, and observability path & CUDA/PyTorch containers, standard cluster telemetry, common job scheduler \\
 Graphics hardware assumption & Relies on RTX-class fixed-function graphics where acquisition cost, driver queues, and framebuffer contracts are natural & Uses software rendering to preserve the Vulkan acquisition contract while running on AI accelerators without graphics-specific silicon \\
-Reconstruction control & DLSS-class reconstruction is powerful but proprietary, product-tuned, and game/display-oriented & Uses integrated 3DGS state as an open DLSS-class counterpart: Gaussian/radiance history, temporal gates, SR, denoising, frame interpolation, and optional learned residuals \\
+Reconstruction control & DLSS-class reconstruction is powerful but proprietary, product-tuned, and game/display-oriented & Uses DGSS as an open 3DGS-based counterpart: Gaussian/radiance history, temporal gates, SR, denoising, frame interpolation, generative completion, and optional learned residuals \\
 Data movement & Simulation cluster emits data that must be moved to AI training storage & Acquisition, reconstruction, world models, and training can share device or nearby storage paths \\
 Optimization target & Per-frame or per-ray graphics performance & Physical evidence, labels, sensor streams, and task accuracy per dollar or joule \\
 Organizational fit & Treated as a specialized simulation/graphics service adjacent to the AI factory & Treated as another AI workload beside training, inference, evaluation, and data processing \\
@@ -1660,8 +1681,8 @@ acquisition path.
 
 % --- semantic state ---
 \node[box, fill=purple!8, below=0.55cm of kernels, minimum width=6.4cm] (state)
-    {\textbf{World-State IR}\\%
-     \scriptsize seed buffers~|~IDs/materials/motion~|~sensors\\%
+    {\textbf{Vulkan-compatible world semantics}\\%
+     \scriptsize persistent cache: seed buffers~|~IDs/materials/motion~|~sensors\\%
      \scriptsize Gaussian/radiance history~|~uncertainty~|~refresh provenance};
 
 % --- silicon ---
@@ -1696,9 +1717,11 @@ backend-agnostic compute IR (LLVM\,/\,MLIR), which is dispatched to
 CUDA, Triton\,/\,SYCL, or AI-accelerator-native backends. The
 acquisition and reconstruction kernels --- 3DGS rasterizer, software tile
 rasterizer, BVH ray traversal, denoising --- run as compute on tensor- and
-SIMT-rich silicon. Their internal semantic product is the World-State IR:
-device-resident seed buffers, IDs, material and motion facts, sensor state,
-Gaussian/radiance history, and uncertainty. The fixed-function graphics path is
+SIMT-rich silicon. Their internal semantic product is Vulkan-compatible world
+semantics: device-resident seed buffers, IDs, material and motion facts, sensor
+state, Gaussian/radiance history, and uncertainty, materialized as a persistent
+state cache. This cache is not a new application-facing IR; it is the private
+reconstruction memory behind the standard Vulkan boundary. The fixed-function graphics path is
 bypassed in this software backend, while a hardware Vulkan acquisition branch
 can still emit the same seed-buffer contract.}
 \label{fig:arch}
@@ -1731,19 +1754,26 @@ can still emit the same seed-buffer contract.}
     Gaussian-splat blending.
 \end{enumerate}
 
-\subsection{World-State IR}
-\label{sec:world-state-ir}
+\subsection{Vulkan-Compatible World Semantics}
+\label{sec:vulkan-world-semantics}
 
-The semantic layer that vkGSplat needs is best understood as a
-\emph{World-State IR}, not as a Vulkan extension. Vulkan remains the
-application-facing acquisition contract. The Compute IR in
-Fig.~\ref{fig:arch} lowers shader and command-buffer work into executable
-kernels; the World-State IR records what those kernels, hardware Vulkan
-captures, physics engines, and sensor models have learned about the world. It is
-closer to an internal database or differentiable simulation state than to a
-public graphics API.
+The semantic layer that vkGSplat needs is best described as
+\emph{Vulkan-compatible world semantics}. Vulkan remains the application-facing
+acquisition contract: applications submit ordinary Vulkan work, and tools still
+see ordinary SPIR-V, descriptors, command buffers, synchronization, and resource
+lifetimes. Behind that boundary, vkGSplat reconstructs enough world semantics
+for Physical AI: identity, motion, geometry, material state, sensor context,
+uncertainty, provenance, and Gaussian/radiance history. This is not a new
+public IR and not a Vulkan extension. In the implementation it is materialized
+as a persistent state cache, closer to an internal database or differentiable
+simulation state than to a public graphics API.
 
-Concretely, a World-State IR entry may contain four classes of device-resident
+The Compute IR in Fig.~\ref{fig:arch} lowers shader and command-buffer work into
+executable kernels; the persistent state cache records what those kernels,
+hardware Vulkan captures, physics engines, and sensor models have learned about
+the world.
+
+Concretely, a state-cache entry may contain four classes of device-resident
 state. First, it stores \emph{acquisition facts}: color or radiance samples,
 depth, primitive ID, barycentric or local coordinates, visibility, motion
 vectors, sample count, and variance. Second, it stores \emph{scene facts}:
@@ -1761,17 +1791,18 @@ truth, uncertainty, object identity, dynamic-light invalidation, shadow
 refresh, and training feedback. But making those semantics part of a new
 standard would fight the ecosystem. The vkGSplat position is therefore
 conservative at the boundary and rich inside the boundary. Applications submit
-ordinary Vulkan work; vkGSplat constructs the World-State IR internally and
+ordinary Vulkan work; vkGSplat constructs the persistent state internally and
 uses it to decide which samples can be reused, which Gaussians must be updated,
 which regions require ray or path-traced oracle refresh, and which tensors feed
 the downstream robot or world model.
 
 This also clarifies how vkGSplat relates to DLSS. DLSS consumes motion, depth,
 exposure, jitter, and history through an SDK and engine integration rather than
-through a new public rendering standard. vkGSplat generalizes that pattern for
-SDG: it keeps the public graphics contract standard, but makes the internal
-history explicit, scene-aware, inspectable, and compatible with CUDA/PyTorch.
-The result is not ``semantic Vulkan.'' It is a World-State IR behind Vulkan.
+through a new public rendering standard. DGSS generalizes that pattern for SDG:
+it keeps the public graphics contract standard, but makes the internal history
+explicit, 3DGS-based, scene-aware, inspectable, and compatible with CUDA/PyTorch.
+The result is not ``semantic Vulkan.'' It is DGSS over a private persistent
+state cache behind Vulkan.
 
 \subsection{Concrete CUDA software stack}
 
@@ -1787,8 +1818,8 @@ display image: it is a compact G-buffer-like seed containing color, depth,
 primitive identity,
 barycentrics or local coordinates, motion-reconstruction inputs, and
 optional sample statistics.  Those buffers remain on the CUDA device and
-become the acquisition-fact portion of the World-State IR. Downstream CUDA
-kernels then use the IR for screen-space motion, history reprojection,
+become the acquisition-fact portion of the persistent state cache. Downstream
+CUDA kernels then use that cache for screen-space motion, history reprojection,
 denoising, temporal antialiasing, invalidation, and eventually Gaussian
 reconstruction.
 
@@ -1818,7 +1849,8 @@ This turns the CUDA backend into a producer--consumer pipeline:
 \downarrow\\
 \text{CUDA software seed renderer}\\
 \downarrow\\
-\text{World-State IR}\\
+\text{Vulkan-compatible world semantics}\\
+\text{in a persistent state cache}\\
 \downarrow\\
 \text{CUDA reconstruction kernels}\\
 \downarrow\\
@@ -2167,14 +2199,15 @@ will stay on RTX hardware for the foreseeable future.
 been proposed informally many times. That is the wrong fight for vkGSplat. In
 the AI data-center setting, the useful move is to embrace the standard world
 and make the implementation programmable behind it. Existing engines (Unreal's
-Vulkan RHI, Unity, Godot, Filament), tooling (RenderDoc, NSight, ImGui), and
+Vulkan RHI, Unity, Godot, Filament), tooling (RenderDoc, Nsight, ImGui), and
 middleware all speak Vulkan. Reusing that surface means a vkGSplat backend
 benefits the ecosystem asymmetrically: applications keep standard Vulkan, while
 the backend decides whether the acquisition comes from RTX hardware, CUDA
 software kernels, or a hybrid path. The semantic layer still matters, but it
-belongs behind the boundary as the World-State IR, where it can evolve with
-3DGS reconstruction, sensor modeling, uncertainty estimation, and training
-feedback without standardizing a new application contract.
+belongs behind the boundary as Vulkan-compatible world semantics materialized in
+a persistent state cache, where it can evolve with 3DGS reconstruction, sensor
+modeling, uncertainty estimation, and training feedback without standardizing a
+new application contract.
 
 \textbf{Strategic implications.} If a viable standard-Vulkan-to-AI-compute
 implementation path exists, the SDG market is no longer constrained by the
