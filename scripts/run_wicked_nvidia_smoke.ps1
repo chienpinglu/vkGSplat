@@ -86,10 +86,10 @@ if (-not $NoBuild) {
 }
 
 $CandidateBins = @(
-    Join-Path $WickedBuildDir "Samples\vkSplatCapture\Release\vkSplatCapture.exe",
-    Join-Path $WickedBuildDir "Samples\vkSplatCapture\vkSplatCapture.exe",
-    Join-Path $WickedBuildDir "Samples\vkSplatCapture\RelWithDebInfo\vkSplatCapture.exe",
-    Join-Path $WickedBuildDir "Samples\vkSplatCapture\Debug\vkSplatCapture.exe"
+    (Join-Path $WickedBuildDir "Samples\vkSplatCapture\Release\vkSplatCapture.exe"),
+    (Join-Path $WickedBuildDir "Samples\vkSplatCapture\vkSplatCapture.exe"),
+    (Join-Path $WickedBuildDir "Samples\vkSplatCapture\RelWithDebInfo\vkSplatCapture.exe"),
+    (Join-Path $WickedBuildDir "Samples\vkSplatCapture\Debug\vkSplatCapture.exe")
 )
 $CaptureBin = $CandidateBins | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $CaptureBin) {

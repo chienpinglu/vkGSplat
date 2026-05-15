@@ -96,3 +96,6 @@ research/*.synctex.gz
 outputs/
 papers/external/
 .git.broken-*/
+cuda_smoke_output/
+cornell_out/
+vk_rt_capture_log.txt

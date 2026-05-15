@@ -30,6 +30,9 @@ option(VKGSPLAT_ENABLE_TORCH
 option(VKGSPLAT_ENABLE_WICKED_NVIDIA_TESTS
     "Register optional Wicked Engine smoke tests that require a real NVIDIA Vulkan GPU"
     OFF)
+option(VKGSPLAT_ENABLE_VK_RT_CAPTURE
+    "Build the vk_rt_capture Phase-4 substitute probe (requires Vulkan)"
+    OFF)
 set(VKGSPLAT_CUDA_ARCHITECTURES ""
     CACHE STRING "CUDA architectures for vkGSplat CUDA targets; empty selects a default list")
 if(APPLE)
@@ -191,6 +194,7 @@ endif()
 
 # --- Apps ------------------------------------------------------------------
 add_subdirectory(apps/viewer)
+add_subdirectory(apps/vk_rt_capture)
 
 # --- Tests -----------------------------------------------------------------
 enable_testing()
